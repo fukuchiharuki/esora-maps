@@ -4,6 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Esora Maps</title>
+<!-- PWA: スマホでインストール可能に (ホーム画面に追加 / インストール) -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#3b82c4">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Esora">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icon-192.png">
 <style>
   html, body {
     margin: 0;
@@ -64,5 +73,11 @@
 <div class="logo">Esora <span>Maps</span></div>
 <div class="hint" id="hint">ドラッグで移動・ピンチ / ホイール / ダブルタップでズーム</div>
 <script type="module" src="main.js"></script>
+<script>
+  // Service Worker 登録 (インストール可能化 + オフライン)。HTTPS か localhost 配信時のみ有効。
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+  }
+</script>
 </body>
 </html>
