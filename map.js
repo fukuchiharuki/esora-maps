@@ -108,7 +108,7 @@ export function tileInfo(tx, ty) {
   if (road && !junction) {
     const vert = conns[0] && conns[2] && !conns[1] && !conns[3];
     const horiz = conns[1] && conns[3] && !conns[0] && !conns[2];
-    if ((vert || horiz) && hash(tx, ty, 37) % 24 === 0) {
+    if ((vert || horiz) && hash(tx, ty, 37) % 12 === 0) {
       const dir = vert ? (hash(tx, ty, 41) % 2 ? 0 : 2) : (hash(tx, ty, 41) % 2 ? 1 : 3);
       stop = { dir };
     }
