@@ -43,18 +43,63 @@ export function makeVehicle(tx, ty, din, dout, isBus) {
     curveCap: 15,      // カーブの速度上限。同上
     accel: 26,         // 加速度上限。シナリオで上書き可
     decel: 80,         // 減速度上限。同上 (チェイス車は高速でも前方車に追突しないよう強め)
+    lat: 0,            // 路肩への横オフセット (車線中心からさらに路肩側へ。0=車線)
+    latTarget: 0,      // 横オフセットの目標 (pullOver=寄せる / returnToLane=戻す)
+    aside: false,      // true=路肩に十分寄った状態。他車から「存在しない」ものとして扱われる
     x: 0, y: 0, hx: 1, hy: 0,
   };
   updateVehiclePos(v);
   return v;
 }
 
+// 路肩寄せ量 (車線中心からさらに路肩側へずらす距離) と横移動の速さ・aside 判定しきい値
+const SHOULDER_OFF = 8;
+const LAT_RATE = 24;                  // 横移動 (units/秒)
+const ASIDE_LAT = SHOULDER_OFF * 0.5; // これ以上寄れば他車から無視される
+const YIELD_R = 80;                   // この距離に現役パトカーが居れば乗用車/バスは路肩へ寄せる
+const YIELD_SPEED = 0;                // 路肩へ寄せている間の速度上限 (0=停止して道を譲る)
+
 const _pp = { x: 0, y: 0, hx: 1, hy: 0 };
 function updateVehiclePos(v) {
   pathPoint(v.path, v.s, _pp);
-  v.x = v.tx * TILE + _pp.x;
-  v.y = v.ty * TILE + _pp.y;
+  // 路肩寄せ: 進行方向の左 (左側通行の路肩側) へ v.lat ずらす。左 = (hy, -hx)。
+  v.x = v.tx * TILE + _pp.x + _pp.hy * v.lat;
+  v.y = v.ty * TILE + _pp.y - _pp.hx * v.lat;
   v.hx = _pp.hx; v.hy = _pp.hy;
+}
+
+// 路肩へ寄せる / 車線へ戻す (走行ルール・シナリオから使う基本操作)。実際の横移動は毎フレーム補間。
+export function pullOver(v) { v.latTarget = SHOULDER_OFF; }
+export function returnToLane(v) { v.latTarget = 0; }
+
+// 直線タイル上か。路肩寄せは直線でのみ行う (カーブ/交差点で横へずらすと舗装外に出るため)。
+function onStraightTile(v) {
+  const t = tileInfo(v.tx, v.ty), c = t.conns;
+  return !t.junction && ((c[0] && c[2] && !c[1] && !c[3]) || (c[1] && c[3] && !c[0] && !c[2]));
+}
+
+// 近くに現役 (確保前) のパトカーが居るか。乗用車/バスが道を譲る (路肩へ寄せる) 判定に使う。
+function nearActivePolice(v) {
+  for (const o of vehicles) {
+    if (o.role !== 'police' || o.parked) continue;
+    const dx = o.x - v.x, dy = o.y - v.y;
+    if (dx * dx + dy * dy < YIELD_R * YIELD_R) return true;
+  }
+  return false;
+}
+
+// v から見て前方の他車 o が課す許容速度 (追従減速)。無関係 (遠い/後方/対向/別車線) なら null。
+function followLimit(v, o) {
+  if (o.aside) return null;                      // 路肩に寄せた車は存在しない扱い (通行の邪魔をしない)
+  const rx = o.x - v.x, ry = o.y - v.y;
+  if (rx * rx + ry * ry > 70 * 70) return null;
+  const fwd = rx * v.hx + ry * v.hy;            // 進行方向の距離
+  if (fwd <= 0) return null;                    // 後方は無視
+  const side = Math.abs(rx * v.hy - ry * v.hx); // 横ずれ
+  if (side > 7) return null;                    // 対向車線 (横ずれ 18) は除外
+  if (o.hx * v.hx + o.hy * v.hy < -0.2 && o.speed > 4) return null; // 動いている対向車
+  const gap = fwd - (v.len + o.len) / 2 - 4;
+  return Math.max(0, gap * 2.2);
 }
 
 // 次の退出口を選ぶ (U ターン禁止、直進を優先)
@@ -70,11 +115,19 @@ function chooseExit(tile, din, isBus) {
 }
 
 function updateVehicle(v, dt) {
+  // 乗用車/バスはパトカー接近で路肩へ寄せ、離れたら戻す (役割車=チェイスは scenario が latTarget を制御)。
+  // 路肩寄せは直線タイル限定 (カーブ/交差点では寄せず通過し、次の直線で寄せる)。
+  if (v.role === null) v.latTarget = (nearActivePolice(v) && onStraightTile(v)) ? SHOULDER_OFF : 0;
+  // 路肩への横移動を毎フレーム補間 (latTarget へ寄せる/戻す)。aside は lat 由来の派生状態。
+  v.lat += Math.max(-LAT_RATE * dt, Math.min(LAT_RATE * dt, v.latTarget - v.lat));
+  v.aside = v.lat > ASIDE_LAT;
+
   // バス停で停車中
   if (v.dwell > 0) {
     v.dwell -= dt;
     v.speed = 0;
     v.stuckT = 0;
+    updateVehiclePos(v); // 寄せ/戻しの横移動を反映
     return;
   }
 
@@ -96,16 +149,12 @@ function updateVehicle(v, dt) {
   // ---- 前方車両への追従減速
   for (const o of vehicles) {
     if (o === v) continue;
-    const rx = o.x - v.x, ry = o.y - v.y;
-    if (rx * rx + ry * ry > 70 * 70) continue;
-    const fwd = rx * v.hx + ry * v.hy;          // 進行方向の距離
-    if (fwd <= 0) continue;                     // 後方は無視
-    const lat = Math.abs(rx * v.hy - ry * v.hx); // 横ずれ
-    if (lat > 7) continue;                      // 対向車線 (横ずれ 18) は除外
-    if (o.hx * v.hx + o.hy * v.hy < -0.2 && o.speed > 4) continue; // 動いている対向車
-    const gap = fwd - (v.len + o.len) / 2 - 4;
-    target = Math.min(target, Math.max(0, gap * 2.2));
+    const lim = followLimit(v, o);
+    if (lim !== null) target = Math.min(target, lim);
   }
+
+  // ---- 路肩へ寄せている間は道を譲って減速 (停止)
+  if (v.role === null && v.latTarget > 0) target = Math.min(target, YIELD_SPEED);
 
   // ---- 交差点進入待ち
   // 予約の「取得」は実際に踏み込む瞬間 (遷移処理) だけで行う。接近フェーズではここで
@@ -209,9 +258,9 @@ export function manageVehicles(now) {
   for (let i = vehicles.length - 1; i >= 0; i--) {
     const v = vehicles[i];
     // 視界外なら撤去。視界内でも 12 秒以上完全停止ならグリッドロックとみなし撤去するが、
-    // parked (確保された車など意図的に停止中) は対象外 → スクロールで視界外に出た時だけ消える。
+    // parked (確保) や aside (路肩へ寄せ中=道を譲って待機) は意図的な停止なので対象外。
     const offView = v.x < wx0 || v.x > wx1 || v.y < wy0 || v.y > wy1;
-    if (offView || (v.stuckT > 12 && !v.parked)) {
+    if (offView || (v.stuckT > 12 && !v.parked && !v.aside)) {
       releaseVehicle(v);
       vehicles.splice(i, 1);
     }

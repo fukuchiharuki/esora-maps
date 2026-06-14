@@ -102,6 +102,7 @@ let t = 1000;
         if (v.speed > 0.5 && v.speed < v.vmax * 0.5 && v.dwell <= 0) slowed = true;
       }
       for (let i = 0; i < vs.length; i++) for (let j = i + 1; j < vs.length; j++) {
+        if (vs[i].aside || vs[j].aside) continue; // 路肩に寄せた車は存在しない扱い (重なり判定から除外)
         const dd = Math.hypot(vs[i].x - vs[j].x, vs[i].y - vs[j].y); if (dd < minPair) minPair = dd;
       }
     }
@@ -190,9 +191,10 @@ let t = 1000;
       if (f < 120) { if (vs.includes(flee)) { camera.cam.x = flee.x; camera.cam.y = flee.y; } }
       else { camera.cam.x += 0.7 * TILE; }
       for (let i = 0; i < vs.length; i++) for (let j = i + 1; j < vs.length; j++) {
+        if (vs[i].aside || vs[j].aside) continue; // 路肩に寄せた車は存在しない扱い
         const dd = Math.hypot(vs[i].x - vs[j].x, vs[i].y - vs[j].y); if (dd < minGap) minGap = dd;
       }
-      for (const v of vs) { if (v.parked) { es.set(v.id, simT); continue; }
+      for (const v of vs) { if (v.parked || v.aside) { es.set(v.id, simT); continue; } // 確保/路肩待機は除外
         if (v.speed > 0.3 || v.dwell > 0 || !es.has(v.id)) es.set(v.id, simT);
         eMaxStuck = Math.max(eMaxStuck, simT - es.get(v.id)); }
       for (const id of [...es.keys()]) if (!vs.some((v) => v.id === id)) es.delete(id);
@@ -246,10 +248,12 @@ let t = 1000;
     if (!cap) fail('E: 確保が発生しなかった');
     if (!(flee.parked && police.parked)) fail('E: 確保後に parked になっていない');
     if (flee.vmax !== 0 || police.vmax !== 0) fail('E: 確保後に停止 (vmax=0) になっていない');
+    if (!(flee.latTarget > 0 && police.latTarget > 0)) fail('E: 確保後に路肩へ寄せない');
     { const ic = render.chaseIconState(); if (ic.flee || ic.police) fail('E: 無力化(確保)後もアイコンが残る'); }
-    const fx = flee.x, fy = flee.y, px = police.x, py = police.y;
+    const fs = flee.s, ps = police.s; // 前進しないこと (横方向の路肩寄せでは動く) を s で確認
     for (let f = 0; f < 120; f++) vehicles.updateAll(1 / 60);
-    if (Math.hypot(flee.x - fx, flee.y - fy) > 0.5 || Math.hypot(police.x - px, police.y - py) > 0.5) fail('E: 確保後に車が動いた');
+    if (Math.abs(flee.s - fs) > 0.5 || Math.abs(police.s - ps) > 0.5) fail('E: 確保後に前進した');
+    if (!(flee.aside && police.aside)) fail('E: 確保後に路肩(aside)にならない');
     for (let f = 0; f < 900; f++) { t += 1000 / 60; camera.cam.x = flee.x; camera.cam.y = flee.y;
       vehicles.manageVehicles(t); scenario.updateScenarios(1 / 60, t); vehicles.updateAll(1 / 60); }
     if (!(vs.includes(flee) && vs.includes(police))) fail('E: スクロール無しで確保車が撤去された');
@@ -354,6 +358,103 @@ process.stdout.write(s);\n`);
   if (s1a !== s1b) fail('I: 同じシードでマップが一致しない (クロスプロセス決定論が壊れている)');
   else if (s1a === s2) fail('I: 異なるシードでマップが変わらない (リロードで別地形にならない)');
   else console.log('検証I: セッション内は同一再生成 / シードで別地形 (リロードで街が変わる) OK');
+}
+
+// ---- 検証 J: 路肩寄せの仕組み (lat 横ずれ / aside は他車から「存在しない」扱い / 寄せ・戻し) ----
+{
+  const vs = vehicles.vehicles;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  let stx, sty;
+  for (let ty = -40; ty <= 40 && stx === undefined; ty++) for (let tx = -40; tx <= 40; tx++) {
+    const ti = tileInfo(tx, ty);
+    if (ti.road && !ti.junction && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; break; }
+  }
+  if (stx === undefined) fail('J: 縦の直線タイルが見つからない');
+  else {
+    // J1: lat は進行方向の左 (路肩側) に位置をずらす。南向き heading=(0,1) の路肩側=(hy,-hx)=(1,0)=+x。
+    clearAll();
+    const v = vehicles.makeVehicle(stx, sty, 0, 2, false); // 南向き (din N, dout S)
+    v.s = v.path.len * 0.5; v.lat = 0; vehicles.repositionVehicle(v);
+    const bx = v.x, by = v.y;
+    v.lat = 5; vehicles.repositionVehicle(v);
+    if (Math.abs((v.x - bx) - 5) > 1e-6 || Math.abs(v.y - by) > 1e-6) fail(`J1: lat の横ずれが不正 (dx=${(v.x - bx).toFixed(2)}, dy=${(v.y - by).toFixed(2)})`);
+
+    // J2: aside の車は追従減速で無視される (車線中央に置き、フラグだけで挙動を切替えて確認)
+    const runBlocked = (aside) => {
+      clearAll();
+      const follower = vehicles.makeVehicle(stx, sty, 0, 2, false);
+      follower.s = 8; follower.speed = follower.vmax; vehicles.repositionVehicle(follower);
+      const blocker = vehicles.makeVehicle(stx, sty, 0, 2, false);
+      blocker.s = 34; blocker.speed = 0; blocker.vmax = 0; blocker.role = 'flee'; // role!=null=挙動層に latTarget を触らせない
+      // aside は lat 由来 (派生)。lat=5 は aside 閾値(4)超 かつ 横ずれ閾値(7)以下 → aside フラグの効果だけを切り分け。
+      blocker.lat = aside ? 5 : 0; blocker.latTarget = blocker.lat; vehicles.repositionVehicle(blocker);
+      vs.push(follower, blocker);
+      let dist = 0;
+      for (let f = 0; f < 90; f++) { if (!vs.includes(follower)) break; vehicles.updateAll(1 / 60); dist += follower.speed / 60; }
+      return { dist, spd: follower.speed };
+    };
+    const blocked = runBlocked(false); // 通常: 前方車で減速・停止
+    const ignored = runBlocked(true);  // aside: 無視して進む
+    if (!(blocked.spd < 3)) fail(`J2: 前方の通常車で減速しない (spd=${blocked.spd.toFixed(1)})`);
+    if (!(ignored.dist > blocked.dist * 2)) fail(`J2: aside の車を無視できていない (ignored=${ignored.dist.toFixed(1)} vs blocked=${blocked.dist.toFixed(1)})`);
+
+    // J3: latTarget (寄せ→戻し) で lat がアニメし aside が立つ/降りる
+    clearAll();
+    const w = vehicles.makeVehicle(stx, sty, 0, 2, false);
+    w.s = w.path.len * 0.4; w.speed = 0; w.vmax = 0; w.role = 'flee'; // role!=null=挙動層に latTarget を触らせない
+    vehicles.repositionVehicle(w);
+    vs.push(w);
+    w.latTarget = 8; // 路肩へ寄せる
+    for (let f = 0; f < 120; f++) vehicles.updateAll(1 / 60);
+    if (!(w.lat > 6) || !w.aside) fail(`J3: 路肩へ寄らない (lat=${(w.lat || 0).toFixed(1)}, aside=${w.aside})`);
+    w.latTarget = 0; // 車線へ戻す
+    for (let f = 0; f < 120; f++) vehicles.updateAll(1 / 60);
+    if (!(w.lat < 1) || w.aside) fail(`J3: 車線に戻らない (lat=${(w.lat || 0).toFixed(1)}, aside=${w.aside})`);
+    clearAll();
+    console.log('検証J: 路肩寄せの仕組み (lat 横ずれ / aside 無視 / 寄せ・戻し) OK');
+  }
+}
+
+// ---- 検証 K: 乗用車/バスはパトカー接近で路肩へ寄せ・減速、離れると車線へ戻り再開 ----
+{
+  const vs = vehicles.vehicles;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  let stx, sty;
+  for (let ty = -40; ty <= 40 && stx === undefined; ty++) for (let tx = -40; tx <= 40; tx++) {
+    const ti = tileInfo(tx, ty);
+    if (ti.road && !ti.junction && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; break; }
+  }
+  if (stx === undefined) fail('K: 縦の直線タイルが見つからない');
+  else {
+    // 近傍に静止した現役パトカーを置き、乗用車が路肩へ寄せて減速するか
+    const setup = (isBus) => {
+      clearAll();
+      const car = vehicles.makeVehicle(stx, sty, 0, 2, isBus);
+      car.s = 18; car.speed = car.vmax; vehicles.repositionVehicle(car);
+      const police = vehicles.makeVehicle(stx, sty, 0, 2, false);
+      police.role = 'police'; police.vmax = 0; police.s = 40; vehicles.repositionVehicle(police);
+      vs.push(car, police);
+      return { car, police };
+    };
+    // K1: 乗用車はパト接近で路肩へ寄せて減速 (aside)
+    const { car, police } = setup(false);
+    for (let f = 0; f < 120; f++) vehicles.updateAll(1 / 60);
+    if (!(car.latTarget > 0)) fail(`K1: パト接近で路肩へ寄せない (latTarget=${car.latTarget})`);
+    if (!car.aside) fail(`K1: 路肩(aside)にならない (lat=${(car.lat || 0).toFixed(1)})`);
+    if (!(car.speed < 5)) fail(`K1: 道を譲って減速しない (spd=${car.speed.toFixed(1)})`);
+    // K2: パトカーが離れる (撤去) → 車線へ戻り走行再開
+    vehicles.removeVehicle(police);
+    for (let f = 0; f < 180; f++) vehicles.updateAll(1 / 60);
+    if (car.latTarget !== 0) fail(`K2: パト離脱後も寄せたまま (latTarget=${car.latTarget})`);
+    if (!(car.lat < 1) || car.aside) fail(`K2: 車線に戻らない (lat=${(car.lat || 0).toFixed(1)}, aside=${car.aside})`);
+    if (!(car.speed > 8)) fail(`K2: 走行を再開しない (spd=${car.speed.toFixed(1)})`);
+    // K3: バスも同様に寄せる (乗用車・バス共通経路 = role===null)
+    const r = setup(true);
+    for (let f = 0; f < 120; f++) vehicles.updateAll(1 / 60);
+    if (!r.car.aside) fail(`K3: バスがパト接近で路肩へ寄せない (lat=${(r.car.lat || 0).toFixed(1)})`);
+    clearAll();
+    console.log('検証K: 乗用車/バスはパト接近で路肩へ寄せ・離脱で車線へ戻る OK');
+  }
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
