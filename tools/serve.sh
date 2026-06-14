@@ -2,8 +2,8 @@
 # =====================================================================
 # Esora Maps をローカル配信して動作確認する。
 #
-# ES モジュールは file:// 不可なので HTTP 配信が必要。配信対象は src/main
-# （アプリ本体＋PWA）のみ。src/test は配信しない。
+# ES モジュールは file:// 不可なので HTTP 配信が必要。リポジトリのルート
+# （index.html ＋ PWA 設定 ＋ src/main）を配信する。
 # 依存は Python3 標準ライブラリだけ（ビルド・追加依存なし）。
 #
 # 使い方:  tools/serve.sh [PORT]      （省略時 8000）
@@ -14,7 +14,7 @@ set -euo pipefail
 
 PORT="${1:-${PORT:-8000}}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DIR="$ROOT/src/main"
+DIR="$ROOT"
 URL="http://localhost:$PORT/"
 
 command -v python3 >/dev/null || { echo "python3 が必要です" >&2; exit 1; }

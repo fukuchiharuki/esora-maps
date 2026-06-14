@@ -237,8 +237,8 @@ function spawnChase(now) {
   return makeChaseEvent(flee, police, now);
 }
 
-// パトカーを生成して返す (まだ push しない)。努力目標として画面外の直線道路
-// (逃走車に近い辺) を優先し、無ければ逃走車近傍 (画面内可) にフォールバックする。
+// パトカーを生成して返す (まだ push しない)。努力目標として画面外の直線道路 (逃走車の
+// 背後側) を優先し、無ければ逃走車近傍 (画面内可) の背後にフォールバック。前方には湧かせない。
 function spawnPolice(flee) {
   const r = rect(0), N = CHASE_SPAWN_BAND;
   const isH = c => c[1] && c[3] && !c[0] && !c[2];     // 横の直線
@@ -257,9 +257,16 @@ function spawnPolice(flee) {
     for (let ty = r.y0 - N; ty <= r.y0 - 1; ty++) add(tx, ty, isV, 0, 2); // 上外 → 南進
     for (let ty = r.y1 + 1; ty <= r.y1 + N; ty++) add(tx, ty, isV, 2, 0); // 下外 → 北進
   }
-  // 画面外に置けない時のフォールバック: 逃走車の近傍 (画面内も可) で逃走車へ向く向き
-  if (!cands.length) {
+  // 逃走車の進行方向 (前方) には湧かせない (向かってくる逃走車と正面ですれ違うため)。
+  // 画面外バンドのうち背後〜側方 (ahead<=0) の候補だけを残す。
+  const ahead = c => (c.t.tx * TILE + 50 - flee.x) * flee.hx + (c.t.ty * TILE + 50 - flee.y) * flee.hy;
+  let pick = cands.filter(c => ahead(c) <= 0);
+
+  // 画面外バンドに背後候補が無ければ、逃走車近傍 (画面内も可) の背後タイルにフォールバック。
+  // (逃走車が来た側＝背後には道路がある事が多いので、ほぼ必ず背後から出せる。前方には出さない)。
+  if (!pick.length) {
     const ftx = Math.floor(flee.x / TILE), fty = Math.floor(flee.y / TILE);
+    const near = [];
     for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) {
       if (Math.abs(dx) + Math.abs(dy) < 3) continue;
       const tx = ftx + dx, ty = fty + dy, t = tileInfo(tx, ty);
@@ -268,17 +275,11 @@ function spawnPolice(flee) {
       for (let d = 0; d < 4; d++) if (t.conns[d]) dirs.push(d);
       let dout = dirs[0], bs = -Infinity;
       for (const d of dirs) { const sc = DX[d] * (flee.x - cx) + DY[d] * (flee.y - cy); if (sc > bs) { bs = sc; dout = d; } }
-      cands.push({ t, din: dirs[0] === dout ? dirs[1] : dirs[0], dout });
+      near.push({ t, din: dirs[0] === dout ? dirs[1] : dirs[0], dout });
     }
+    pick = near.filter(c => ahead(c) <= 0);
   }
-  if (!cands.length) return null;
-
-  // 逃走車の進行方向 (前方) に湧くと、向かってくる逃走車と正面からすれ違ってしまう。
-  // → 前方の候補を除外し、背後〜側方からだけ湧かせる (パトカーは背後から追う形になる)。
-  //   前方しか候補が無い稀なケースは best-effort で全候補から選ぶ。
-  const ahead = c => (c.t.tx * TILE + 50 - flee.x) * flee.hx + (c.t.ty * TILE + 50 - flee.y) * flee.hy;
-  const rear = cands.filter(c => ahead(c) <= 0);
-  const pick = rear.length ? rear : cands;
+  if (!pick.length) return null;
 
   // 逃走車に近い順に試す
   const dist = c => (c.t.tx * TILE + 50 - flee.x) ** 2 + (c.t.ty * TILE + 50 - flee.y) ** 2;

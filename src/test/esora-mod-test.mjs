@@ -147,12 +147,15 @@ let t = 1000;
   const inBox = (v, b) => v.x >= b.x0 && v.x <= b.x1 && v.y >= b.y0 && v.y <= b.y1;
   let runs = 0, removedOutsideRuns = 0, policeOffscreenRuns = 0;
   for (let attempt = 0; attempt < 4; attempt++) {
-    camera.placeCamera(); camera.zoomAt(600, 400, 1.6);
+    camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
     for (let f = 0; f < 300; f++) { t += 1000 / 60; vehicles.manageVehicles(t); vehicles.updateAll(1 / 60); }
     let ev = null, snap = null, nBefore = 0;
-    for (let tries = 0; tries < 80 && !ev; tries++) {
+    for (let tries = 0; tries < 240 && !ev; tries++) {
       snap = new Set(vs); nBefore = vs.length; ev = scenario.forceSpawn(t, 'chase');
-      if (!ev) { t += 1000 / 60; vehicles.manageVehicles(t); vehicles.updateAll(1 / 60); }
+      if (!ev) {
+        t += 1000 / 60; vehicles.manageVehicles(t); vehicles.updateAll(1 / 60);
+        if (tries % 60 === 59) { camera.cam.x += 1300; camera.cam.y += 800; } // 別エリアへ移り母数確保
+      }
     }
     if (!ev) { fail('D: カーチェイスをスポーンできなかった'); break; }
     runs++;
@@ -223,10 +226,14 @@ let t = 1000;
     if (ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; sdin = 0; sdout = 2; break search; }
   }
   if (stx === undefined) fail('E: 直線タイルが見つからない');
-  camera.placeCamera(); camera.zoomAt(600, 400, 1.6);
+  camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
   for (let f = 0; f < 360; f++) { t += 1000 / 60; vehicles.manageVehicles(t); vehicles.updateAll(1 / 60); }
   let ev = null;
-  for (let tries = 0; tries < 150 && !ev; tries++) { t += 1000 / 60; vehicles.manageVehicles(t); vehicles.updateAll(1 / 60); ev = scenario.forceSpawn(t, 'chase'); }
+  for (let tries = 0; tries < 240 && !ev; tries++) {
+    t += 1000 / 60; vehicles.manageVehicles(t); vehicles.updateAll(1 / 60);
+    if (tries % 60 === 59) { camera.cam.x += 1300; camera.cam.y += 800; } // 別エリアへ移り母数確保
+    ev = scenario.forceSpawn(t, 'chase');
+  }
   if (!ev) fail('E: チェイスをスポーンできなかった');
   else {
     const flee = ev.flee, police = ev.police, lp = lanePath(sdin, sdout);
@@ -315,7 +322,7 @@ let t = 1000;
     const dot = (p.x - f.x) * f.hx + (p.y - f.y) * f.hy;
     const cos = dot / (Math.hypot(p.x - f.x, p.y - f.y) || 1);
     minCos = Math.min(minCos, cos); maxCos = Math.max(maxCos, cos);
-    if (dot > 1) aheadCount++;
+    if (cos > 0.25) aheadCount++; // 進行方向の前方コーン (約75°以内) に湧いたら NG (側方/背後は可)
     vehicles.removeVehicle(p); vehicles.removeVehicle(f);
     scenario.updateScenarios(1 / 60, t);
   }
