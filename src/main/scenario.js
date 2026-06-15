@@ -7,8 +7,9 @@
 // 【フレームワーク】
 //   ScenarioEvent インスタンス = { update(dt, now), done:boolean, cleanup?() }
 //   イベント定義 = { id, weight, spawn(now) -> event | null }
-//   registerEvent(def) で定義を登録すると、マネージャ (updateScenarios) が
-//   稀に (一度に 1 つ) スポーンし、毎フレーム update し、done で後始末する。
+//   registerEvent(def) で定義を登録すると、マネージャ (updateScenarios) が稀にスポーンし、
+//   毎フレーム update し、done で後始末する。別種のイベントは同時に存在してよい (例: チェイスと
+//   ゴミ収集)。ただし同種は同時に 1 つだけ (進行中の種は自動発生の候補から除く)。
 //
 // 【契約の維持】
 //   イベントが操る車両も、走行は通常車と同じ vehicles.js のルールに従う
@@ -57,25 +58,36 @@ export function updateScenarios(dt, now) {
     if (active[i].done) {
       if (active[i].cleanup) active[i].cleanup();
       active.splice(i, 1);
-      nextSpawnT = now + randGap();
     }
   }
 
-  if (active.length === 0 && now >= nextSpawnT && EVENT_DEFS.length) {
-    const ev = pickWeighted(EVENT_DEFS).spawn(now);
-    if (ev) active.push(ev);
-    else nextSpawnT = now + 4000; // 条件が整わなければ少し後に再試行
+  // 稀に自動発生。チェイス (逃走車) とゴミ収集は別種なので同時に存在してよい。ただし各種は同時に
+  // 1 つだけ (= 既に進行中の種は候補から除く)。発生間隔は種をまたいで randGap で空ける (= 稀)。
+  if (now >= nextSpawnT && EVENT_DEFS.length) {
+    const avail = EVENT_DEFS.filter(d => !active.some(e => e.id === d.id));
+    if (!avail.length) {
+      nextSpawnT = now + randGap();            // 両種とも進行中 → 次の機会まで待つ
+    } else {
+      const ev = pickWeighted(avail).spawn(now);
+      if (ev) { active.push(ev); nextSpawnT = now + randGap(); }
+      else nextSpawnT = now + 4000;            // 条件が整わなければ少し後に再試行
+    }
   }
 }
 
-// 即時スポーン (テスト/デモ用にレアタイマーを迂回)。成功すれば管理下に入れる。
+// 即時スポーン (テスト/デモ用にレアタイマーを迂回)。成功すれば管理下に入れる。明示スポーンしたら
+// 以後の自動発生は止める (テストの決定性のため。setNextSpawnAt で再開できる)。
 export function forceSpawn(now, id = 'chase') {
   const def = EVENT_DEFS.find(d => d.id === id);
   if (!def) return null;
   const ev = def.spawn(now);
   if (ev) active.push(ev);
+  nextSpawnT = Infinity; // 明示スポーン後は自動発生を止める (テスト/デモ)
   return ev;
 }
+
+// テスト/デモ用: 次に自動発生を許可する時刻を設定する (forceSpawn で止めた自動発生の再開など)。
+export function setNextSpawnAt(now) { nextSpawnT = now; }
 
 // =====================================================================
 // 第一弾イベント: カーチェイス (逃走車 vs パトカー)

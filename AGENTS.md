@@ -34,7 +34,7 @@
 - camera.js — ビュー変換・ズーム・画面↔ワールド変換
 - render.js — 描画（道路・車両・ゴミ＋ハイライトの跳ね・波紋エフェクト ＋ カーチェイス発生アイコン右下 HUD。引きで車両/ゴミを拡大）
 - input.js — ドラッグ / ピンチ / ホイール / ダブルタップ / タップ（onTap）
-- scenario.js — ScenarioEvent 基盤 ＋ カーチェイス（逃走車 vs パトカー）＋ ゴミ収集（収集車 vs ゴミ。タップでハイライト誘導）
+- scenario.js — ScenarioEvent 基盤 ＋ カーチェイス（逃走車 vs パトカー）＋ ゴミ収集（収集車 vs ゴミ。タップでハイライト誘導）。別種は同時発生可（チェイスとゴミ収集が共存しうる）・同種は単一
 - PWA 設定（ルート）: index.html ＋ manifest.webmanifest / sw.js / icon-*.png
 
 ## 規約

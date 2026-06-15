@@ -1252,5 +1252,40 @@ process.stdout.write(s);\n`);
   }
 }
 
+// ---- 検証 AF: チェイス(逃走車)とゴミ収集は自動で同時に存在し得る。同種は同時に存在しない ----
+{
+  const vs = vehicles.vehicles, ls = litter.litter;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  ls.splice(0, ls.length); clearAll(); scenario.events.length = 0;
+  camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
+  const ev = forceGarbage(); // ゴミ収集を先に発生させ、視界に保ったまま自動発生を許可する
+  if (!ev || !ev.truck) fail('AF: ゴミ収集車をスポーンできない');
+  else {
+    const truck = ev.truck;
+    scenario.setNextSpawnAt(t); // forceSpawn が止めた自動発生を、次フレームから許可
+    let coexist = false, twoChase = false, twoGarb = false;
+    for (let f = 0; f < 1200 && !coexist; f++) {
+      t += 1000 / 60;
+      camera.cam.x = truck.x; camera.cam.y = truck.y; // 収集車を視界に保つ (デスポーン回避)
+      vehicles.manageVehicles(t);          // チェイス昇格用の通常車を周囲に維持
+      scenario.updateScenarios(1 / 60, t); // マネージャ: ゴミ収集が進行中でもチェイスを自動発生し得る
+      vehicles.updateAll(1 / 60);
+      const ch = scenario.events.filter(e => e.id === 'chase').length;
+      const gb = scenario.events.filter(e => e.id === 'garbage').length;
+      if (ch > 1) twoChase = true;
+      if (gb > 1) twoGarb = true;
+      if (ch >= 1 && gb >= 1) coexist = true;
+    }
+    if (!coexist) fail('AF: ゴミ収集とチェイスが自動で同時に存在できない');
+    if (twoChase) fail('AF: 逃走車(チェイス)が同時に2つ存在した');
+    if (twoGarb) fail('AF: ゴミ収集車が同時に2つ存在した');
+    // 同種は forceSpawn でも増えない (単一化ガード)
+    if (scenario.events.some(e => e.id === 'garbage') && scenario.forceSpawn(t, 'garbage') !== null) fail('AF: 収集車が2台になった');
+    if (scenario.events.some(e => e.id === 'chase') && scenario.forceSpawn(t, 'chase') !== null) fail('AF: 逃走車が2つになった');
+    clearAll(); ls.splice(0, ls.length); scenario.events.length = 0;
+    console.log('検証AF: チェイスとゴミ収集は自動で共存可・同種は共存しない OK');
+  }
+}
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);
