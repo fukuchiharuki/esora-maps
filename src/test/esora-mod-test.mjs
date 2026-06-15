@@ -632,5 +632,50 @@ process.stdout.write(s);\n`);
   if (minGap < 7) fail(`O: パトカーが前方車に追突した (車間 ${minGap.toFixed(1)})`);
 }
 
+// ---- 検証 P: 退避状態の復帰は「他の走行車両が接近していないとき」だけ ----
+//   パトカーが離れても、退避先 (車線中心) の近くを走行車両が通っている間は復帰せず維持し、
+//   走行車両がいなくなってから車線へ戻る。
+{
+  const vs = vehicles.vehicles;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  let stx, sty;
+  for (let ty = -40; ty <= 40 && stx === undefined; ty++) for (let tx = -40; tx <= 40; tx++) {
+    const ti = tileInfo(tx, ty);
+    if (ti.road && !ti.junction && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; break; }
+  }
+  if (stx === undefined) fail('P: 縦の直線タイルが見つからない');
+  else {
+    // パト接近で退避状態を作る
+    clearAll();
+    const car = vehicles.makeVehicle(stx, sty, 0, 2, false);
+    car.s = car.path.len * 0.5; car.speed = 0; vehicles.repositionVehicle(car);
+    const police = vehicles.makeVehicle(stx, sty, 0, 2, false);
+    police.role = 'police'; police.vmax = 0; police.s = car.path.len * 0.5 + 12; vehicles.repositionVehicle(police);
+    vs.push(car, police);
+    for (let f = 0; f < 120; f++) vehicles.updateAll(1 / 60);
+    if (!car.aside) fail('P: 前提 - パト接近で退避状態にならない');
+    vehicles.removeVehicle(police);
+    // P1: 退避先 (車線中心) の近くを走行車両が通っている間は復帰しない (維持)
+    const runner = vehicles.makeVehicle(stx, sty, 0, 2, false);
+    runner.role = 'flee'; // 退避ロジック対象外 (= ただの走行車両として置く)
+    runner.vmax = 30;
+    vs.push(runner);
+    let stayedAside = true;
+    for (let f = 0; f < 90; f++) {
+      runner.s = car.s; runner.speed = 30; vehicles.repositionVehicle(runner); // 退避車の車線位置を走行車両が通過し続ける
+      vehicles.updateAll(1 / 60);
+      if (car.latTarget <= 0) stayedAside = false;
+    }
+    if (!stayedAside || !car.aside) fail(`P1: 走行車両が接近中なのに復帰した (latTarget=${car.latTarget}, aside=${car.aside})`);
+    // P2: 走行車両がいなくなったら車線へ復帰する
+    vehicles.removeVehicle(runner);
+    for (let f = 0; f < 180; f++) vehicles.updateAll(1 / 60);
+    if (car.latTarget !== 0) fail(`P2: 走行車両が去っても復帰しない (latTarget=${car.latTarget})`);
+    if (!(car.lat < 1) || car.aside) fail(`P2: 車線へ戻りきらない (lat=${car.lat.toFixed(1)}, aside=${car.aside})`);
+    clearAll();
+    console.log('検証P: 退避は走行車両が接近中は維持・いなくなったら復帰 OK');
+  }
+}
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

@@ -61,6 +61,9 @@ const YIELD_SPEED = 0;                // 路肩へ寄せている間の速度上
 
 const _pp = { x: 0, y: 0, hx: 1, hy: 0 };
 function updateVehiclePos(v) {
+  // 横ずれは直線でのみ許す不変条件をここで担保 (位置へ効かせる唯一の地点)。タイル遷移直後など、
+  // 非直線タイルに居て横ずれが残っていると舗装外に出るので 0 に戻す。
+  if (v.lat !== 0 && !onStraightTile(v)) v.lat = 0;
   pathPoint(v.path, v.s, _pp);
   // 路肩寄せ: 進行方向の左 (左側通行の路肩側) へ v.lat ずらす。左 = (hy, -hx)。
   v.x = v.tx * TILE + _pp.x + _pp.hy * v.lat;
@@ -84,6 +87,41 @@ function nearActivePolice(v) {
     if (o.role !== 'police' || o.parked) continue;
     const dx = o.x - v.x, dy = o.y - v.y;
     if (dx * dx + dy * dy < YIELD_R * YIELD_R) return true;
+  }
+  return false;
+}
+
+// 退避状態 (路肩へ寄せて道を譲る) の遷移ロジック (通常車 = role===null 用)。直線でのみ寄せられる
+// (カーブ/交差点では横へずらすと舗装外に出るため戻す)。latTarget>0 を「退避状態」とみなす
+// (退避中の車は YIELD_SPEED=0 で停止しているのでタイルを跨がない → 状態を持っても破綻しない)。
+//  - 退避状態への移行: 通常車線に居て、パトカーが接近したら寄せる
+//  - 退避状態の維持:   退避中でパトカーが近いうちは寄せたまま
+//  - 退避状態からの復帰: 退避中でパトカーが離れたら車線へ戻す
+function updateYieldState(v) {
+  if (!onStraightTile(v)) { v.latTarget = 0; return; } // 直線でなければ寄せられない
+  const aside = v.latTarget > 0;
+  if (!aside) {
+    if (nearActivePolice(v)) v.latTarget = SHOULDER_OFF; // 移行
+  } else if (canReturnToLane(v)) {
+    v.latTarget = 0;                                     // 復帰
+  }
+  // それ以外 (退避中 かつ 復帰条件を満たさない) は SHOULDER_OFF のまま = 維持
+}
+
+// 退避状態から通常車線へ復帰してよいか。パトカーが離れ、かつ復帰先 (車線) に向けて走行中の
+// 他車が接近していないとき (= 車線が空いたとき) だけ復帰する。
+function canReturnToLane(v) {
+  return !nearActivePolice(v) && !trafficApproaching(v);
+}
+
+// 復帰先 (車線中心) の近くを走行中の他車が通っているか。退避を解いて車線へ戻る前に確認する。
+const RETURN_CLEAR_R = 16; // 復帰先からこの距離内に走行車両が居れば復帰しない (対向車線 18 は除外)
+function trafficApproaching(v) {
+  const cx = v.x - v.hy * v.lat, cy = v.y + v.hx * v.lat; // 路肩オフセットを戻した車線中心
+  for (const o of vehicles) {
+    if (o === v || o.speed <= 3) continue; // 走行中 (停止/退避中でない) の他車のみ
+    const dx = o.x - cx, dy = o.y - cy;
+    if (dx * dx + dy * dy < RETURN_CLEAR_R * RETURN_CLEAR_R) return true;
   }
   return false;
 }
@@ -121,9 +159,9 @@ function chooseExit(tile, din, isBus) {
 }
 
 function updateVehicle(v, dt) {
-  // 乗用車/バスはパトカー接近で路肩へ寄せ、離れたら戻す (役割車=チェイスは scenario が latTarget を制御)。
-  // 路肩寄せは直線タイル限定 (カーブ/交差点では寄せず通過し、次の直線で寄せる)。
-  if (v.role === null) v.latTarget = (nearActivePolice(v) && onStraightTile(v)) ? SHOULDER_OFF : 0;
+  // 乗用車/バスはパトカー接近で路肩へ寄せ・維持し、条件を満たせば戻す (役割車=チェイスは
+  // scenario が latTarget を制御)。路肩寄せは直線タイル限定 (カーブ/交差点では寄せず通過)。
+  if (v.role === null) updateYieldState(v);
   // 路肩への横移動を毎フレーム補間 (latTarget へ寄せる/戻す)。aside は lat 由来の派生状態。
   // 横ずれは直線でのみ許す。非直線 (カーブ/交差点) では横へずらすと舗装外に出るので、戻りきる前に
   // 進入しても道路外に出ないよう横ずれを残さない (車線中心に戻す)。
