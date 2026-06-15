@@ -243,9 +243,12 @@ let t = 1000;
     flee.tx = stx; flee.ty = sty; flee.din = sdin; flee.dout = sdout; flee.path = lp; flee.s = lp.len * 0.6; flee.steer = null; flee.speed = 0;
     police.tx = stx; police.ty = sty; police.din = sdin; police.dout = sdout; police.path = lp; police.s = lp.len * 0.6 - 16; police.steer = null; police.speed = 0;
     vehicles.repositionVehicle(flee); vehicles.repositionVehicle(police);
+    // 確保前は両車とも走行中 (急停止を確認するため非ゼロ速度から確保させる)
+    flee.speed = 40; police.speed = 80;
     let cap = false;
     for (let f = 0; f < 60 && !cap; f++) { ev.update(1 / 60, t); t += 1000 / 60; cap = ev.captured; }
     if (!cap) fail('E: 確保が発生しなかった');
+    if (!(flee.speed === 0 && police.speed === 0)) fail(`E: 確保で急停止しない (flee=${flee.speed.toFixed(1)}, police=${police.speed.toFixed(1)})`);
     if (!(flee.parked && police.parked)) fail('E: 確保後に parked になっていない');
     if (flee.vmax !== 0 || police.vmax !== 0) fail('E: 確保後に停止 (vmax=0) になっていない');
     if (!(flee.latTarget > 0 && police.latTarget > 0)) fail('E: 確保後に路肩へ寄せない');
@@ -317,6 +320,7 @@ let t = 1000;
   let spawned = 0, aheadCount = 0, minCos = Infinity, maxCos = -Infinity;
   for (let run = 0; run < 12; run++) {
     camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
+    camera.cam.x += run * 1500; camera.cam.y += run * 900; // run ごとに別エリアへ (スポーン母数を安定確保)
     for (let f = 0; f < 300; f++) { t += 1000 / 60; vehicles.manageVehicles(t); vehicles.updateAll(1 / 60); }
     let ev = null;
     for (let tr = 0; tr < 150 && !ev; tr++) { t += 1000 / 60; vehicles.manageVehicles(t); vehicles.updateAll(1 / 60); ev = scenario.forceSpawn(t, 'chase'); }
@@ -442,12 +446,14 @@ process.stdout.write(s);\n`);
     if (!(car.latTarget > 0)) fail(`K1: パト接近で路肩へ寄せない (latTarget=${car.latTarget})`);
     if (!car.aside) fail(`K1: 路肩(aside)にならない (lat=${(car.lat || 0).toFixed(1)})`);
     if (!(car.speed < 5)) fail(`K1: 道を譲って減速しない (spd=${car.speed.toFixed(1)})`);
-    // K2: パトカーが離れる (撤去) → 車線へ戻り走行再開
+    // K2: パトカーが離れる (撤去) → 車線へ戻り走行再開。再開は瞬間速度でなく前進量で見る
+    // (到達先がカーブ/交差点だと計測時点でたまたま減速中のことがあるため)。
     vehicles.removeVehicle(police);
-    for (let f = 0; f < 180; f++) vehicles.updateAll(1 / 60);
+    let resumeDist = 0;
+    for (let f = 0; f < 180; f++) { vehicles.updateAll(1 / 60); resumeDist += car.speed / 60; }
     if (car.latTarget !== 0) fail(`K2: パト離脱後も寄せたまま (latTarget=${car.latTarget})`);
     if (!(car.lat < 1) || car.aside) fail(`K2: 車線に戻らない (lat=${(car.lat || 0).toFixed(1)}, aside=${car.aside})`);
-    if (!(car.speed > 8)) fail(`K2: 走行を再開しない (spd=${car.speed.toFixed(1)})`);
+    if (!(resumeDist > 20)) fail(`K2: 走行を再開しない (前進 ${resumeDist.toFixed(1)})`);
     // K3: バスも同様に寄せる (乗用車・バス共通経路 = role===null)
     const r = setup(true);
     for (let f = 0; f < 120; f++) vehicles.updateAll(1 / 60);
@@ -455,6 +461,175 @@ process.stdout.write(s);\n`);
     clearAll();
     console.log('検証K: 乗用車/バスはパト接近で路肩へ寄せ・離脱で車線へ戻る OK');
   }
+}
+
+// ---- 検証 L: パトカーは交差点・カーブで減速しない (位置関係由来の減速のみ残す) ----
+//   本番のパトカー (spawnChase の設定) を取り出し、カーブ/交差点タイルに単独配置して、
+//   減速控えめの逃走車 (上限あり) より明確に速く出ること = 上限が外れていることを確認する。
+{
+  const vs = vehicles.vehicles;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  clearAll();
+  camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
+  for (let f = 0; f < 360; f++) { t += 1000 / 60; vehicles.manageVehicles(t); vehicles.updateAll(1 / 60); }
+  let ev = null;
+  for (let tries = 0; tries < 240 && !ev; tries++) {
+    t += 1000 / 60; vehicles.manageVehicles(t); vehicles.updateAll(1 / 60);
+    if (tries % 60 === 59) { camera.cam.x += 1300; camera.cam.y += 800; }
+    ev = scenario.forceSpawn(t, 'chase');
+  }
+  if (!ev) fail('L: チェイスをスポーンできなかった');
+  else {
+    const police = ev.police, flee = ev.flee;
+    // カーブタイル (2口・直交) と 直進できる交差点タイル (対向口あり) を探す
+    let cv, jn;
+    for (let ty = -40; ty <= 40 && (!cv || !jn); ty++) for (let tx = -40; tx <= 40; tx++) {
+      const ti = tileInfo(tx, ty); if (!ti.road) continue; const c = ti.conns;
+      if (!jn && ti.junction) { for (let d = 0; d < 2; d++) if (c[d] && c[d + 2]) { jn = { tx, ty, din: d, dout: d + 2 }; break; } }
+      if (!cv && !ti.junction && c.filter(Boolean).length === 2 && !((c[0] && c[2]) || (c[1] && c[3]))) {
+        const ds = []; for (let d = 0; d < 4; d++) if (c[d]) ds.push(d); cv = { tx, ty, din: ds[0], dout: ds[1] };
+      }
+    }
+    if (!cv) fail('L: カーブタイルが見つからない');
+    if (!jn) fail('L: 直進できる交差点タイルが見つからない');
+    if (cv && jn) {
+      // 単独配置して「開始タイルに居る間の最大速度」を測る (他車なし=位置関係由来の減速は発生しない)
+      const maxOnTile = (v, cell) => {
+        clearAll();
+        v.tx = cell.tx; v.ty = cell.ty; v.din = cell.din; v.dout = cell.dout; v.path = lanePath(cell.din, cell.dout);
+        v.s = 0; v.speed = 0; v.dwell = 0; v.served = false; v.steer = null; v.parked = false;
+        v.lat = 0; v.latTarget = 0; v.aside = false; v.stuckT = 0;
+        vehicles.repositionVehicle(v); vs.push(v);
+        let mx = 0;
+        for (let f = 0; f < 200; f++) { vehicles.updateAll(1 / 60); if (v.tx !== cell.tx || v.ty !== cell.ty) break; mx = Math.max(mx, v.speed); }
+        return mx;
+      };
+      const cP = maxOnTile(police, cv), cF = maxOnTile(flee, cv);
+      const jP = maxOnTile(police, jn), jF = maxOnTile(flee, jn);
+      clearAll();
+      console.log(`検証L: カーブ パト${cP.toFixed(0)}/逃走車${cF.toFixed(0)}, 交差点 パト${jP.toFixed(0)}/逃走車${jF.toFixed(0)}`);
+      if (!(cP > cF + 3)) fail(`L: パトカーがカーブで減速している (パト${cP.toFixed(1)} ≦ 逃走車${cF.toFixed(1)}+3)`);
+      if (!(jP > jF + 3)) fail(`L: パトカーが交差点で減速している (パト${jP.toFixed(1)} ≦ 逃走車${jF.toFixed(1)}+3)`);
+    }
+  }
+}
+
+// ---- 検証 M: パトカーは直線で逃走車との車間で減速しない (背後に詰める) / カーブでは追従して追突しない ----
+{
+  const vs = vehicles.vehicles;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  let stx, sty, cv;
+  for (let ty = -40; ty <= 40 && stx === undefined; ty++) for (let tx = -40; tx <= 40; tx++) {
+    const ti = tileInfo(tx, ty);
+    if (ti.road && !ti.junction && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; break; }
+  }
+  for (let ty = -40; ty <= 40 && !cv; ty++) for (let tx = -40; tx <= 40; tx++) {
+    const ti = tileInfo(tx, ty); if (!ti.road || ti.junction) continue; const c = ti.conns;
+    if (c.filter(Boolean).length === 2 && !((c[0] && c[2]) || (c[1] && c[3]))) { const ds = []; for (let d = 0; d < 4; d++) if (c[d]) ds.push(d); cv = { tx, ty, din: ds[0], dout: ds[1] }; }
+  }
+  if (stx === undefined) fail('M: 縦の直線タイルが見つからない');
+  else if (!cv) fail('M: カーブタイルが見つからない');
+  else {
+    // 直線: 前方に停止した逃走車 (flee)・後方に追従車。通常車は追従して停止、パトカーは無視して走り続ける。
+    const runStraight = (role) => {
+      clearAll();
+      const lead = vehicles.makeVehicle(stx, sty, 0, 2, false);
+      lead.s = lead.path.len * 0.6; lead.speed = 0; lead.vmax = 0; lead.role = 'flee'; vehicles.repositionVehicle(lead);
+      const fol = vehicles.makeVehicle(stx, sty, 0, 2, false);
+      fol.s = lead.path.len * 0.05; fol.vmax = 40; fol.speed = 40; fol.role = role; vehicles.repositionVehicle(fol);
+      vs.push(lead, fol);
+      let dist = 0;
+      for (let f = 0; f < 120; f++) { if (!vs.includes(fol)) break; vehicles.updateAll(1 / 60); dist += fol.speed / 60; }
+      return { dist, spd: fol.speed };
+    };
+    const normal = runStraight(null);     // 通常車: 前方の逃走車に追従して停止
+    const police = runStraight('police');  // パトカー: 直線では逃走車を無視して詰める (止まらない)
+    // カーブ: パトカーも追従減速する (位置関係由来の減速は残す) → 停止した逃走車を追い越さない
+    clearAll();
+    const lead = vehicles.makeVehicle(cv.tx, cv.ty, cv.din, cv.dout, false);
+    lead.s = lead.path.len * 0.6; lead.speed = 0; lead.vmax = 0; lead.role = 'flee'; vehicles.repositionVehicle(lead);
+    const fol = vehicles.makeVehicle(cv.tx, cv.ty, cv.din, cv.dout, false);
+    fol.s = lead.path.len * 0.05; fol.vmax = 40; fol.speed = 40; fol.role = 'police'; vehicles.repositionVehicle(fol);
+    vs.push(lead, fol);
+    let passedOnCurve = false;
+    for (let f = 0; f < 120; f++) { vehicles.updateAll(1 / 60); if (fol.tx !== cv.tx || fol.ty !== cv.ty) break; if (fol.s > lead.s - 1) passedOnCurve = true; }
+    clearAll();
+    console.log(`検証M: 直線 通常 spd${normal.spd.toFixed(0)}/走行${normal.dist.toFixed(0)}, パト spd${police.spd.toFixed(0)}/走行${police.dist.toFixed(0)}, カーブ追突=${passedOnCurve}`);
+    if (!(normal.spd < 5)) fail(`M: 通常車が前方の逃走車で停止しない (spd=${normal.spd.toFixed(1)})`);
+    if (!(police.spd > 15)) fail(`M: パトカーが直線で逃走車との車間で減速した (spd=${police.spd.toFixed(1)})`);
+    if (passedOnCurve) fail('M: パトカーがカーブで逃走車を無視して追突した (カーブでは追従減速すべき)');
+  }
+}
+
+// ---- 検証 N: 横ずれ (lat) は非直線タイル (カーブ/交差点) では残さない ----
+//   寄せた状態 (lat>0) のまま非直線タイルに居ると、車線中心から外れて舗装外に出る
+//   (例: 道を譲った車が戻りきる前にカーブ/交差点へ進入)。非直線タイルでは横ずれを許さない
+//   契約を直接確認する (直線では許す)。
+{
+  const vs = vehicles.vehicles;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  const findTile = (pred) => { for (let ty = -40; ty <= 40; ty++) for (let tx = -40; tx <= 40; tx++) {
+    const ti = tileInfo(tx, ty); if (!ti.road) continue; const r = pred(ti); if (r) return { tx, ty, ...r }; } return null; };
+  const curve = findTile((ti) => { if (ti.junction) return null; const c = ti.conns;
+    if (c.filter(Boolean).length !== 2 || (c[0] && c[2]) || (c[1] && c[3])) return null; const ds = []; for (let d = 0; d < 4; d++) if (c[d]) ds.push(d); return { din: ds[0], dout: ds[1] }; });
+  const junc = findTile((ti) => { if (!ti.junction) return null; for (let d = 0; d < 2; d++) if (ti.conns[d] && ti.conns[d + 2]) return { din: d, dout: d + 2 }; return null; });
+  const straight = findTile((ti) => { if (ti.junction) return null; const c = ti.conns;
+    if (c[0] && c[2] && !c[1] && !c[3]) return { din: 0, dout: 2 }; if (c[1] && c[3] && !c[0] && !c[2]) return { din: 1, dout: 3 }; return null; });
+  if (!curve || !junc || !straight) fail('N: カーブ/交差点/直線タイルが揃わない');
+  else {
+    // 非直線タイルに lat=8 を持つ車を置いて 1 フレーム進めると、横ずれは 0 に落ちる (=道路外に出ない)
+    const latAfter = (cell) => {
+      clearAll();
+      const v = vehicles.makeVehicle(cell.tx, cell.ty, cell.din, cell.dout, false);
+      v.role = 'flee'; v.s = v.path.len * 0.5; v.speed = 0; v.vmax = 0; v.lat = 8; v.latTarget = 8;
+      vehicles.repositionVehicle(v); vs.push(v);
+      vehicles.updateAll(1 / 60); const after = v.lat; const off = offRoadOf(v); clearAll(); return { after, off };
+    };
+    const cv = latAfter(curve), jn = latAfter(junc), st = latAfter(straight);
+    console.log(`検証N: 横ずれ後 lat カーブ${cv.after.toFixed(1)} 交差点${jn.after.toFixed(1)} 直線${st.after.toFixed(1)}`);
+    if (cv.after > 0.01 || cv.off) fail(`N: カーブで横ずれが残る (lat=${cv.after.toFixed(2)}, 逸脱=${cv.off})`);
+    if (jn.after > 0.01 || jn.off) fail(`N: 交差点で横ずれが残る (lat=${jn.after.toFixed(2)}, 逸脱=${jn.off})`);
+    if (!(st.after > 7)) fail(`N: 直線で横ずれが許されない (lat=${st.after.toFixed(2)})`); // 直線では路肩寄せ可
+  }
+}
+
+// ---- 検証 O: パトカーは交差点・カーブで減速しなくても前方車に追突しない (追従減速は残る) ----
+//   パトカーはカーブ/交差点で速度上限が無い (検証L) ため、前方車 (カーブで減速) へ高速で迫る。
+//   アーク状の横ずれを側方ゲートで取りこぼすと追従減速が効かず追突する。多エリアで強制スポーン
+//   した実チェイスを走らせ、「パトカーが関わるペア」の最小車間で追突しないことを確認する。
+//   (通常車どうしの車間は路肩待避まわりの別課題なので、ここではパトカー由来の追突に絞る)
+{
+  const vs = vehicles.vehicles;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  clearAll();
+  scenario.events.length = 0; // 先行テストが残した進行中チェイスを掃除 (spawnChase は同時 1 件まで)
+  camera.placeCamera(); camera.zoomAt(600, 400, 1.4);
+  let chases = 0, minGap = Infinity;
+  for (let area = 0; area < 24 && chases < 16; area++) {
+    clearAll(); scenario.events.length = 0; // エリアごとに独立させる (前エリアのチェイス車を残さない)
+    camera.cam.x += 2100; camera.cam.y += 1300; // 別エリアへ (重複しない地形でチェイスを起こす)
+    for (let f = 0; f < 200; f++) { t += 1000 / 60; vehicles.manageVehicles(t); vehicles.updateAll(1 / 60); }
+    let ev = null;
+    for (let tries = 0; tries < 120 && !ev; tries++) { t += 1000 / 60; vehicles.manageVehicles(t); vehicles.updateAll(1 / 60); ev = scenario.forceSpawn(t, 'chase'); }
+    if (!ev) continue;
+    chases++;
+    const flee = ev.flee;
+    for (let f = 0; f < 1500 && !ev.done; f++) {
+      t += 1000 / 60;
+      const tgt = vs.includes(flee) ? flee : null; if (tgt) { camera.cam.x = tgt.x; camera.cam.y = tgt.y; } // 視界に留めて確保まで観察
+      vehicles.manageVehicles(t); scenario.updateScenarios(1 / 60, t); vehicles.updateAll(1 / 60);
+      for (let i = 0; i < vs.length; i++) for (let j = i + 1; j < vs.length; j++) {
+        if (vs[i].aside || vs[j].aside) continue;
+        if (vs[i].role !== 'police' && vs[j].role !== 'police') continue; // パトカーが関わるペアに絞る
+        const dd = Math.hypot(vs[i].x - vs[j].x, vs[i].y - vs[j].y); if (dd < minGap) minGap = dd;
+      }
+      if (ev.captured) break; // 確保後は両車停止 → このエリアは観察終了
+    }
+  }
+  clearAll();
+  console.log(`検証O: 多エリア強制チェイス ${chases} 件, パト関与の最小車間 ${minGap.toFixed(1)}`);
+  if (chases < 4) fail(`O: チェイスが十分起きない (${chases})`);
+  if (minGap < 7) fail(`O: パトカーが前方車に追突した (車間 ${minGap.toFixed(1)})`);
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);

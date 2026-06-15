@@ -95,9 +95,15 @@ function followLimit(v, o) {
   if (rx * rx + ry * ry > 70 * 70) return null;
   const fwd = rx * v.hx + ry * v.hy;            // 進行方向の距離
   if (fwd <= 0) return null;                    // 後方は無視
-  const side = Math.abs(rx * v.hy - ry * v.hx); // 横ずれ
-  if (side > 7) return null;                    // 対向車線 (横ずれ 18) は除外
-  if (o.hx * v.hx + o.hy * v.hy < -0.2 && o.speed > 4) return null; // 動いている対向車
+  const police = v.role === 'police';
+  const chaseTarget = police && o.role === 'flee'; // 同一ルートを追走する当事者ペア
+  // パトカーは直線では逃走車との車間で減速しない → 背後に詰めて確保へ (確保は直線限定)。
+  if (chaseTarget && onStraightTile(v) && onStraightTile(o)) return null;
+  if (o.hx * v.hx + o.hy * v.hy < -0.2 && o.speed > 4) return null; // 動いている対向車は無視
+  // 側方ゲート: 対向/別車線 (横ずれ 18) を除外。パトカーは交差点・カーブで減速せず高速で前方車に
+  // 迫るため、アーク状の横ずれで前方車を取りこぼすと追突する → 対向車線 (18) は外しつつ広め (15)。
+  // パト×逃走車は同一ルートの追走なので側方ゲート無し (カーブのアーク状横ずれでも必ず追従)。
+  if (!chaseTarget && Math.abs(rx * v.hy - ry * v.hx) > (police ? 15 : 7)) return null;
   const gap = fwd - (v.len + o.len) / 2 - 4;
   return Math.max(0, gap * 2.2);
 }
@@ -119,7 +125,10 @@ function updateVehicle(v, dt) {
   // 路肩寄せは直線タイル限定 (カーブ/交差点では寄せず通過し、次の直線で寄せる)。
   if (v.role === null) v.latTarget = (nearActivePolice(v) && onStraightTile(v)) ? SHOULDER_OFF : 0;
   // 路肩への横移動を毎フレーム補間 (latTarget へ寄せる/戻す)。aside は lat 由来の派生状態。
-  v.lat += Math.max(-LAT_RATE * dt, Math.min(LAT_RATE * dt, v.latTarget - v.lat));
+  // 横ずれは直線でのみ許す。非直線 (カーブ/交差点) では横へずらすと舗装外に出るので、戻りきる前に
+  // 進入しても道路外に出ないよう横ずれを残さない (車線中心に戻す)。
+  if (onStraightTile(v)) v.lat += Math.max(-LAT_RATE * dt, Math.min(LAT_RATE * dt, v.latTarget - v.lat));
+  else v.lat = 0;
   v.aside = v.lat > ASIDE_LAT;
 
   // バス停で停車中
