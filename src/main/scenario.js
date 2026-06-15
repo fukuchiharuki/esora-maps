@@ -18,9 +18,10 @@
 //   確保時も特別扱いはせず vmax=0 で止めるだけ (v.parked で停止を許容)。
 // =====================================================================
 import { DX, DY, OPP, TILE } from './config.js';
-import { vehicles, makeVehicle, removeVehicle, repositionVehicle, pullOver } from './vehicles.js';
+import { vehicles, makeVehicle, removeVehicle, repositionVehicle, pullOver, returnToLane } from './vehicles.js';
 import { tileInfo } from './map.js';
 import { rect } from './camera.js';
+import { litter, nearestLitter, collectAround } from './litter.js';
 
 // 出来事の発生間隔 (秒)。次の発生までこの範囲のランダム時間あける = 稀。
 const SCENARIO_MIN_GAP = 55;
@@ -33,6 +34,7 @@ export function registerEvent(def) { EVENT_DEFS.push(def); }
 const active = [];
 export const events = active;           // 進行中イベント (読み取り用)
 let nextSpawnT = null;                   // 次にスポーンを許す時刻 (ms)
+let lastNow = 0;                         // 直近フレームの時刻 (tapWorld のスポーン時刻に使う)
 
 const randGap = () => (SCENARIO_MIN_GAP + Math.random() * (SCENARIO_MAX_GAP - SCENARIO_MIN_GAP)) * 1000;
 
@@ -46,6 +48,7 @@ function pickWeighted(defs) {
 
 // 毎フレーム: 進行中イベントを更新 → 終了を後始末 → 稀に新規スポーン
 export function updateScenarios(dt, now) {
+  lastNow = now;
   if (nextSpawnT === null) nextSpawnT = now + randGap();
 
   for (const ev of active) ev.update(dt, now);
@@ -310,3 +313,109 @@ function spawnPolice(flee) {
 }
 
 registerEvent({ id: 'chase', weight: 1, spawn: spawnChase });
+
+// =====================================================================
+// 第二弾イベント: ゴミ収集 (ゴミ収集車 vs 路肩のゴミ)
+//
+// 路肩のゴミ (litter.js) を回収して回る収集車。稀に湧き、同時に 1 台 (努力目標)。
+// ユーザーの操作なしにはゴミを探索しない (= 目的地誘導しない)。ただし走行中に左路肩の
+// ゴミへ接近したら反応的に寄せて回収し、無くなれば車線へ戻る。ゴミをタップすると、その
+// ゴミへ向かう (居なければスポーンして向かう)。
+// =====================================================================
+const GARBAGE_DETECT_R = 44;    // 前方〜真横この距離内のゴミに反応して路肩へ寄せる (対向車線側も含む)
+const GARBAGE_COLLECT_R = 36;   // 路肩へ寄せた収集車がこの距離内のゴミを回収 (道路幅をまたいで対向路肩も届く)
+const GARBAGE_DRIVE_VMAX = 28;  // 通常走行速度 (トラックなので控えめ)
+const GARBAGE_COLLECT_SPEED = 6;// 回収のため路肩を徐行する速度
+const GARBAGE_MAX_LIFE = 90000; // 安全策: この時間で打ち切り (ms)
+const GARBAGE_TAP_R = 40;       // タップ点からこの距離内のゴミを「タップした」とみなす
+
+// 収集車の近く (前方〜真横、両側) にゴミがあるか。直線タイル上のみ (寄せるのは直線限定)。
+// 対向車線のゴミでも反応する → 走行車線の路肩へ寄せる (req: 対向車線のゴミでも寄せる)。
+function collectibleNear(truck) {
+  const ti = tileInfo(Math.floor(truck.x / TILE), Math.floor(truck.y / TILE));
+  if (!isStraightTile(ti)) return null;
+  for (const g of litter) {
+    const rx = g.x - truck.x, ry = g.y - truck.y;
+    if (rx * rx + ry * ry > GARBAGE_DETECT_R * GARBAGE_DETECT_R) continue;
+    const fwd = rx * truck.hx + ry * truck.hy;       // 前方成分 (後方に過ぎたものは除く)
+    if (fwd > -GARBAGE_COLLECT_R) return g;
+  }
+  return null;
+}
+
+function makeGarbageEvent(truck, now) {
+  return {
+    id: 'garbage', truck, t0: now, seen: false, done: false, dest: null,
+    update(dt, t) {
+      if (vehicles.indexOf(truck) < 0) { this.done = true; return; } // グリッドロック撤去等で消えた
+      // 反応的回収: 近くにゴミがあれば走行車線の路肩へ寄せて徐行。回収は「路肩へ寄せた (aside) とき」
+      // だけ行う (req: 路肩に寄せずに回収しない / 対向車線のゴミでも自車線の路肩へ寄せて回収)。
+      // 道路幅をまたぐ COLLECT_R なので、自車線の路肩からでも対向路肩のゴミに届く。
+      if (collectibleNear(truck)) {
+        pullOver(truck);
+        truck.vmax = GARBAGE_COLLECT_SPEED;
+        if (truck.aside) collectAround(truck.x, truck.y, GARBAGE_COLLECT_R);
+      } else {
+        returnToLane(truck);
+        truck.vmax = GARBAGE_DRIVE_VMAX;
+      }
+      // タップ誘導: 目的地のゴミが回収/消滅したら誘導解除 (以後は通常走行 = 探索しない)。
+      // 回収自体は上の「寄せてから回収」に委ねる (路肩に寄せずには回収しない)。
+      if (this.dest && litter.indexOf(this.dest) < 0) { this.dest = null; truck.steer = null; }
+      // 視界に一度入ったか → 入った後に視界外へ十分離れたら撤去 (チェイスと同様)
+      if (!this.seen && inBox(truck, viewBoxWorld())) this.seen = true;
+      if ((this.seen && outsideBy(truck, 3)) || t - this.t0 > GARBAGE_MAX_LIFE) {
+        removeVehicle(truck); this.done = true;
+      }
+    },
+  };
+}
+
+// ゴミ収集車を画面外の直線道路 (無ければ視界内) に生成して返す。同時 1 台。
+function spawnGarbage(now) {
+  if (active.some(e => e.id === 'garbage')) return null; // 同時に 2 台以上出さない
+  const r = rect(0), N = 4;
+  const isH = c => c[1] && c[3] && !c[0] && !c[2];
+  const isV = c => c[0] && c[2] && !c[1] && !c[3];
+  const cands = [];
+  const add = (tx, ty, want, din, dout) => { const t = tileInfo(tx, ty); if (t.road && !t.junction && want(t.conns)) cands.push({ t, din, dout }); };
+  for (let ty = r.y0; ty <= r.y1; ty++) {
+    for (let tx = r.x0 - N; tx <= r.x0 - 1; tx++) add(tx, ty, isH, 3, 1); // 左外 → 東進
+    for (let tx = r.x1 + 1; tx <= r.x1 + N; tx++) add(tx, ty, isH, 1, 3); // 右外 → 西進
+  }
+  for (let tx = r.x0; tx <= r.x1; tx++) {
+    for (let ty = r.y0 - N; ty <= r.y0 - 1; ty++) add(tx, ty, isV, 0, 2); // 上外 → 南進
+    for (let ty = r.y1 + 1; ty <= r.y1 + N; ty++) add(tx, ty, isV, 2, 0); // 下外 → 北進
+  }
+  if (!cands.length) { // フォールバック: 視界内の直線 (稀なのでポップイン許容)
+    for (let ty = r.y0; ty <= r.y1; ty++) for (let tx = r.x0; tx <= r.x1; tx++) {
+      const t = tileInfo(tx, ty); if (!t.road || t.junction) continue;
+      if (isV(t.conns)) cands.push({ t, din: 0, dout: 2 });
+      else if (isH(t.conns)) cands.push({ t, din: 3, dout: 1 });
+    }
+  }
+  if (!cands.length) return null;
+  const pick = cands[(Math.random() * cands.length) | 0];
+  const truck = makeVehicle(pick.t.tx, pick.t.ty, pick.din, pick.dout, false);
+  truck.role = 'garbage'; truck.color = '#7ec8dc'; truck.len = 20; truck.wid = 9;
+  truck.vmax = GARBAGE_DRIVE_VMAX;
+  truck.s = truck.path.len * 0.5; repositionVehicle(truck);
+  vehicles.push(truck);
+  return makeGarbageEvent(truck, now);
+}
+
+registerEvent({ id: 'garbage', weight: 1, spawn: spawnGarbage });
+
+// ゴミをタップ → 収集車をそのゴミへ向かわせる (居なければスポーン)。ゴミ以外のタップは何も
+// しない (false を返し、ダブルタップズーム等を妨げない)。
+export function tapWorld(wx, wy) {
+  const g = nearestLitter(wx, wy, GARBAGE_TAP_R);
+  if (!g) return false;                                   // ゴミを指していない → 非消費
+  let ev = active.find(e => e.id === 'garbage');
+  if (!ev) { ev = spawnGarbage(lastNow); if (ev) active.push(ev); } // 不在ならスポーンして管理下へ
+  if (ev && ev.truck) {                                   // タップしたゴミへ誘導
+    ev.dest = g;
+    ev.truck.steer = (tile, din) => pursue(tile, din, g);
+  }
+  return true;                                            // ゴミを指したタップは消費
+}

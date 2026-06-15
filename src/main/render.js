@@ -12,6 +12,7 @@ import { TILE, ROAD_W, SIDE_W, LANE_OFF, DX, DY, MIN_ZOOM, MAX_ZOOM } from './co
 import { hash, rnd01 } from './rng.js';
 import { tileInfo } from './map.js';
 import { vehicles } from './vehicles.js';
+import { litter } from './litter.js';
 import { cam, view, rect, setViewport } from './camera.js';
 
 let canvas = null, ctx = null;
@@ -168,6 +169,23 @@ function vehicleDrawScale() {
   return 1 + c * (VEHICLE_DRAW_SCALE_MAX - 1);
 }
 
+// 路肩のゴミ袋 (車両以外のオブジェクト)。車両と同じく引きで大きく描く (タップしやすく)。
+function drawLitter(g) {
+  ctx.save();
+  ctx.translate(g.x, g.y);
+  const ds = vehicleDrawScale();
+  ctx.scale(ds, ds);
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';                       // 影
+  ctx.beginPath(); ctx.ellipse(0.6, 1.6, 4.4, 2.4, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#86cfe0';                                // 水色のゴミ袋
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(-4, -3.5, 8, 7, 3); else ctx.rect(-4, -3.5, 8, 7);
+  ctx.fill();
+  ctx.fillStyle = '#5aa6b8';                                // 結び目 (濃いめの水色)
+  ctx.beginPath(); ctx.moveTo(-2, -3.2); ctx.lineTo(0, -5); ctx.lineTo(2, -3.2); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
 function drawVehicle(v) {
   const flash = (performance.now() % 440) < 220; // 赤青灯の点滅位相
   ctx.save();
@@ -186,6 +204,24 @@ function drawVehicle(v) {
   // 影
   ctx.fillStyle = 'rgba(0,0,0,0.18)';
   ctx.fillRect(-L / 2 + 1, -W / 2 + 1.5, L, W);
+  // ゴミ収集車: 頭 (前方=+x) 白 / 後方コンテナ 水色 の 2 色
+  if (v.role === 'garbage') {
+    const cab = L * 0.36; // 頭の長さ
+    ctx.fillStyle = '#7ec8dc'; // コンテナ (水色)
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-L / 2, -W / 2, L, W, 2.4); else ctx.rect(-L / 2, -W / 2, L, W);
+    ctx.fill();
+    ctx.fillStyle = '#f2f5f8'; // 頭 (白)
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(L / 2 - cab, -W / 2, cab, W, 2.4); else ctx.rect(L / 2 - cab, -W / 2, cab, W);
+    ctx.fill();
+    ctx.fillStyle = '#3b4250'; // コンテナの仕切り線
+    ctx.fillRect(L / 2 - cab - 1, -W / 2 + 0.6, 1.4, W - 1.2);
+    ctx.fillStyle = 'rgba(40,55,75,0.78)'; // 頭の窓 (前)
+    ctx.fillRect(L / 2 - cab * 0.62, -W / 2 + 1.4, cab * 0.4, W - 2.8);
+    ctx.restore();
+    return;
+  }
   // 車体
   ctx.fillStyle = v.color;
   ctx.beginPath();
@@ -222,13 +258,14 @@ function drawVehicle(v) {
 // 存在する間は出し続け、デスポーン (撤去) または無力化 (確保=parked) され次第消す。
 // =====================================================================
 export function chaseIconState() {
-  let flee = false, police = false;
+  let flee = false, police = false, garbage = false;
   for (const v of vehicles) {
+    if (v.role === 'garbage') { garbage = true; continue; } // 収集車は存在する間ずっと表示
     if (v.parked) continue;              // 無力化 (確保) 済みは知らせ終わり → 非表示
     if (v.role === 'flee') flee = true;
     else if (v.role === 'police') police = true;
   }
-  return { flee, police };
+  return { flee, police, garbage };
 }
 
 // 白丸の中に上向きのミニカーを描く (原点中心)
@@ -254,6 +291,21 @@ function drawMiniCar(color, isPolice) {
   }
 }
 
+// 白丸の中に上向きのミニ収集車を描く (頭=上=白 / コンテナ=下=水色)
+function drawMiniTruck() {
+  const W = 13, L = 21, cab = L * 0.36;
+  ctx.fillStyle = '#7ec8dc';                         // コンテナ (水色)
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(-W / 2, -L / 2, W, L, 3); else ctx.rect(-W / 2, -L / 2, W, L);
+  ctx.fill();
+  ctx.fillStyle = '#f2f5f8';                         // 頭 (白)
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(-W / 2, -L / 2, W, cab, 3); else ctx.rect(-W / 2, -L / 2, W, cab);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(40,55,75,0.82)';             // 窓
+  ctx.fillRect(-W / 2 + 2, -L / 2 + 2, W - 4, cab * 0.5);
+}
+
 function drawIcon(cx, cy, R, kind) {
   ctx.save();                                        // 白丸 + 影
   ctx.shadowColor = 'rgba(0,0,0,0.30)';
@@ -271,19 +323,21 @@ function drawIcon(cx, cy, R, kind) {
   ctx.stroke();
   ctx.save();
   ctx.translate(cx, cy);
-  drawMiniCar(kind === 'flee' ? '#1b1d22' : '#eaf0f7', kind === 'police');
+  if (kind === 'garbage') drawMiniTruck();
+  else drawMiniCar(kind === 'flee' ? '#1b1d22' : '#eaf0f7', kind === 'police');
   ctx.restore();
 }
 
 function drawChaseIcons() {
   const st = chaseIconState();
-  if (!st.flee && !st.police) return;
+  if (!st.flee && !st.police && !st.garbage) return;
   ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0); // スクリーン座標 (CSS px) に戻す
   const R = 21, pad = 18, gap = 12;
   const cy = view.cssH - pad - R;
-  const list = [];                                   // 右端から左へ: パトカー → 逃走車
+  const list = [];                                   // 右端から左へ: パトカー → 逃走車 → 収集車
   if (st.police) list.push('police');
   if (st.flee) list.push('flee');
+  if (st.garbage) list.push('garbage');
   for (let i = 0; i < list.length; i++) {
     drawIcon(view.cssW - pad - R - i * (2 * R + gap), cy, R, list[i]);
   }
@@ -313,10 +367,13 @@ export function drawScene() {
   for (const t of roadTiles) drawRoadBase(t, 1); // 車道
   if (detailed) for (const t of roadTiles) drawRoadDetail(t);
 
-  // 車両 (画面内のみ)
+  // 路肩のゴミ → 車両 (いずれも画面内のみ)
   const m = 40 / z;
   const wx0 = cam.x - view.cssW / 2 / z - m, wx1 = cam.x + view.cssW / 2 / z + m;
   const wy0 = cam.y - view.cssH / 2 / z - m, wy1 = cam.y + view.cssH / 2 / z + m;
+  for (const g of litter) {
+    if (g.x >= wx0 && g.x <= wx1 && g.y >= wy0 && g.y <= wy1) drawLitter(g);
+  }
   for (const v of vehicles) {
     if (v.x >= wx0 && v.x <= wx1 && v.y >= wy0 && v.y <= wy1) drawVehicle(v);
   }

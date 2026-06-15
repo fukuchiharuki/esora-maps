@@ -1,12 +1,15 @@
 // =====================================================================
-// 操作 (ドラッグ移動 / ピンチズーム / ホイールズーム / ダブルタップズーム)
+// 操作 (ドラッグ移動 / ピンチズーム / ホイールズーム / ダブルタップズーム / タップ)
 //
-// ジェスチャを解釈してカメラへ指示するだけ。タップは詳細表示などを一切
-// 起こさない (ダブルタップズームのみ)。Safari のページピンチも無効化。
+// ジェスチャを解釈してカメラへ指示する。単発タップは onTap(worldX, worldY) へ渡し、
+// ハンドラが「消費した (true)」場合はダブルタップズームに使わない (例: ゴミのタップ)。
+// 消費されなければ従来どおり (タップ単体は何も起こさず、2 連続でズーム)。
+// 禁止インタラクション (詳細表示・投稿・評価・検索・ログイン・現在地・外部遷移) は引き続き無し。
+// Safari のページピンチも無効化。
 // =====================================================================
-import { cam, zoomAt, beginDoubleTapZoom, cancelAnim } from './camera.js';
+import { cam, zoomAt, beginDoubleTapZoom, cancelAnim, screenToWorld } from './camera.js';
 
-export function initInput(canvas) {
+export function initInput(canvas, onTap) {
   const pointers = new Map();
   let lastTap = { t: 0, x: 0, y: 0 };
   let downPos = null, moved = false;
@@ -50,8 +53,11 @@ export function initInput(canvas) {
     const wasSingle = pointers.size === 1;
     pointers.delete(e.pointerId);
     if (pointers.size === 0) canvas.classList.remove('dragging');
-    // ダブルタップズーム (動かしていない単独タップ × 2)
+    // 単発タップ (動かしていない単独タップ) → まず onTap へ。消費されたら以降の処理はしない。
     if (wasSingle && !moved && e.type === 'pointerup') {
+      const w = screenToWorld(e.clientX, e.clientY);
+      if (onTap && onTap(w.x, w.y)) { lastTap.t = 0; return; } // 消費 (ゴミのタップ等) → ズームに使わない
+      // ダブルタップズーム (動かしていない単独タップ × 2)
       const now = performance.now();
       if (now - lastTap.t < 350 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 32) {
         beginDoubleTapZoom(e.clientX, e.clientY, now);

@@ -10,6 +10,7 @@ import { ENTRY, EXIT, lanePath, pathPoint } from '../main/roadpart.js';
 import * as camera from '../main/camera.js';
 import * as vehicles from '../main/vehicles.js';
 import * as scenario from '../main/scenario.js';
+import * as litter from '../main/litter.js';
 import * as render from '../main/render.js';
 import { DX, DY, OPP, TILE, ROAD_W, MIN_ZOOM, MAX_ZOOM } from '../main/config.js';
 import { writeFileSync } from 'node:fs';
@@ -284,7 +285,11 @@ let t = 1000;
   f.parked = false; p.parked = false;
   vehicles.removeVehicle(f); vehicles.removeVehicle(p); s = render.chaseIconState();
   if (s.flee || s.police) fail('F: デスポーンでアイコンが消えない');
-  console.log('検証F: アイコンは 昇格/スポーンで表示・無力化(確保)/デスポーンで非表示 OK');
+  const tr = mk('garbage'); s = render.chaseIconState();
+  if (!s.garbage) fail('F: 収集車スポーンでアイコン(収集車)が出ない');
+  vehicles.removeVehicle(tr); s = render.chaseIconState();
+  if (s.garbage) fail('F: 収集車デスポーンでアイコンが消えない');
+  console.log('検証F: アイコンは 昇格/スポーン/収集車で表示・無力化(確保)/デスポーンで非表示 OK');
 }
 
 // ---- 検証 G: 発生アイコンが右下に描画される (呼び出し記録コンテキスト) ----
@@ -310,8 +315,13 @@ let t = 1000;
     if (circles.length < 2) fail(`G: 白丸が2つ以上描かれない (${circles.length})`);
     if (br.length < 2) fail('G: アイコンが右下に配置されていない');
   }
+  mk('garbage'); // 収集車も加わると右下のアイコンが 1 つ増える
+  calls.length = 0; render.drawScene();
+  const hi = calls.findIndex(isHud);
+  const circles3 = hi < 0 ? [] : calls.slice(hi).filter((c) => c[0] === 'arc' && Math.abs(c[1][2] - 21) < 0.01);
+  if (circles3.length < 3) fail(`G: 収集車のアイコンが増えない (${circles3.length})`);
   vs.splice(0, vs.length);
-  console.log('検証G: 発生アイコンは右下に白丸で描画される OK');
+  console.log('検証G: 発生アイコンは右下に白丸で描画される (収集車含む) OK');
 }
 
 // ---- 検証 H: パトカーは逃走車の進行方向 (前方) からはスポーンしない (正面すれ違い防止) ----
@@ -709,6 +719,200 @@ process.stdout.write(s);\n`);
   }
   if (car.len !== len0 || car.wid !== wid0) fail('Q: 描画で当たり判定サイズ (len/wid) が変わった');
   console.log('検証Q: 引きで拡大・最寄りは実寸・len/wid 不変 OK');
+}
+
+// ---- 検証 R: ゴミ (路肩オブジェクト) の基本 (生成 / ヒットテスト / 回収) ----
+{
+  const ls = litter.litter;
+  const clearLitter = () => ls.splice(0, ls.length);
+  let stx, sty;
+  for (let ty = -30; ty <= 30 && stx === undefined; ty++) for (let tx = -30; tx <= 30; tx++) {
+    const ti = tileInfo(tx, ty);
+    if (ti.road && !ti.junction && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; break; }
+  }
+  if (stx === undefined) fail('R: 縦の直線タイルが見つからない');
+  else {
+    clearLitter();
+    const g = litter.makeLitter(stx, sty, 2, 0.5); // 南向き (dir=2) の左路肩
+    const lx = g.x - stx * TILE, ly = g.y - sty * TILE;
+    if (!(ls.length === 1)) fail('R: ゴミが追加されない');
+    if (!(Math.abs(lx - 50) <= 18.01 || Math.abs(ly - 50) <= 18.01)) fail(`R: ゴミが路肩 (道路帯) に無い (local ${lx.toFixed(0)},${ly.toFixed(0)})`);
+    if (litter.nearestLitter(g.x, g.y, 20) !== g) fail('R: nearestLitter がタップ点近傍のゴミを返さない');
+    if (litter.nearestLitter(g.x + 999, g.y, 20) !== null) fail('R: nearestLitter が遠方で null を返さない');
+    if (litter.collectAround(g.x, g.y, 18) !== 1 || ls.length !== 0) fail('R: collectAround で回収されない');
+    console.log('検証R: ゴミ 生成/ヒットテスト/回収 OK');
+  }
+}
+
+// ---- 検証 S: ゴミ収集車は左路肩のゴミに接近すると寄せて回収し、無くなれば車線へ戻る ----
+{
+  const vs = vehicles.vehicles, ls = litter.litter;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  ls.splice(0, ls.length); clearAll(); scenario.events.length = 0;
+  let stx, sty;
+  for (let ty = -30; ty <= 30 && stx === undefined; ty++) for (let tx = -30; tx <= 30; tx++) {
+    const ti = tileInfo(tx, ty);
+    if (ti.road && !ti.junction && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; break; }
+  }
+  camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
+  const ev = scenario.forceSpawn(t, 'garbage');
+  if (!ev || !ev.truck) fail('S: ゴミ収集車をスポーンできない');
+  else if (stx === undefined) fail('S: 直線タイルが無い');
+  else {
+    const truck = ev.truck, lp = lanePath(0, 2);
+    truck.tx = stx; truck.ty = sty; truck.din = 0; truck.dout = 2; truck.path = lp; truck.s = lp.len * 0.35; truck.steer = null;
+    truck.speed = truck.vmax || 20; vehicles.repositionVehicle(truck);
+    litter.makeLitter(stx, sty, 2, 0.6); // 進行方向 (南) の左路肩・前方
+    const before = ls.length;
+    let pulled = false, collected = false, collectedWhileNotAside = false;
+    for (let f = 0; f < 360 && !(pulled && collected); f++) {
+      camera.cam.x = truck.x; camera.cam.y = truck.y; // 視界に留める (視界外デスポーン回避)
+      const asideAt = truck.aside, lenAt = ls.length; // 回収は ev.update 内で aside 判定して行われる
+      ev.update(1 / 60, t); vehicles.updateAll(1 / 60); t += 1000 / 60;
+      if (truck.latTarget > 0) pulled = true;
+      if (ls.length < before) collected = true;
+      if (ls.length < lenAt && !asideAt) collectedWhileNotAside = true; // 路肩に寄せずに回収した
+    }
+    if (!pulled) fail('S: ゴミに接近しても路肩へ寄せない');
+    if (!collected) fail('S: 寄せても近くのゴミを回収しない');
+    if (collectedWhileNotAside) fail('S: 路肩へ寄せていない (aside でない) のに回収した');
+    // 回収後、近くのゴミが無くなれば車線へ戻り走行再開
+    let returned = false, resumed = 0;
+    for (let f = 0; f < 300; f++) {
+      camera.cam.x = truck.x; camera.cam.y = truck.y;
+      ev.update(1 / 60, t); vehicles.updateAll(1 / 60); t += 1000 / 60;
+      if (truck.latTarget === 0) returned = true;
+      resumed += truck.speed / 60;
+    }
+    if (!returned) fail('S: ゴミが無くなっても車線へ戻らない');
+    if (!(resumed > 20)) fail(`S: 回収後に走行を再開しない (前進 ${resumed.toFixed(1)})`);
+    clearAll(); ls.splice(0, ls.length); scenario.events.length = 0;
+    console.log('検証S: 収集車は接近で寄せ・回収・離脱で車線へ戻る OK');
+  }
+}
+
+// ---- 検証 T: ゴミ収集車はユーザー操作なしにゴミを探索しない (遠くのゴミへ誘導/接近しない) ----
+{
+  const vs = vehicles.vehicles, ls = litter.litter;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  ls.splice(0, ls.length); clearAll(); scenario.events.length = 0;
+  let stx, sty;
+  for (let ty = -30; ty <= 30 && stx === undefined; ty++) for (let tx = -30; tx <= 30; tx++) {
+    const ti = tileInfo(tx, ty);
+    if (ti.road && !ti.junction && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; break; }
+  }
+  camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
+  const ev = scenario.forceSpawn(t, 'garbage');
+  if (ev && ev.truck && stx !== undefined) {
+    const truck = ev.truck, lp = lanePath(0, 2);
+    truck.tx = stx; truck.ty = sty; truck.din = 0; truck.dout = 2; truck.path = lp; truck.s = lp.len * 0.4; truck.steer = null;
+    truck.speed = truck.vmax || 20; vehicles.repositionVehicle(truck);
+    litter.makeLitter(stx, sty - 5, 2, 0.5); // 進行方向 (南) と逆 = 背後 5 タイル先 (DETECT_R 外、近づかない)
+    let steered = false;
+    for (let f = 0; f < 180; f++) {
+      camera.cam.x = truck.x; camera.cam.y = truck.y;
+      ev.update(1 / 60, t); vehicles.updateAll(1 / 60); t += 1000 / 60;
+      if (truck.steer !== null) steered = true;
+    }
+    if (steered) fail('T: 操作なしに遠くのゴミへ誘導 (探索) した');
+    clearAll(); ls.splice(0, ls.length); scenario.events.length = 0;
+    console.log('検証T: 収集車は操作なしにゴミを探索しない OK');
+  } else fail('T: ゴミ収集車をスポーンできない');
+}
+
+// ---- 検証 U: ゴミのタップで収集車が向かう / 不在ならスポーン / 同時に 1 台 ----
+{
+  const vs = vehicles.vehicles, ls = litter.litter;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  ls.splice(0, ls.length); clearAll(); scenario.events.length = 0;
+  if (typeof scenario.tapWorld !== 'function') fail('U: scenario.tapWorld が未実装');
+  else {
+    // U3: ゴミが無い場所のタップは消費しない (ダブルタップズーム等を妨げない)
+    if (scenario.tapWorld(123456, 123456) !== false) fail('U3: ゴミ不在のタップを消費した');
+    // U1: 収集車不在 + ゴミをタップ → スポーンして誘導
+    let stx, sty;
+    for (let ty = -30; ty <= 30 && stx === undefined; ty++) for (let tx = -30; tx <= 30; tx++) {
+      const ti = tileInfo(tx, ty);
+      if (ti.road && !ti.junction && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; break; }
+    }
+    camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
+    camera.cam.x = stx * TILE + 50; camera.cam.y = sty * TILE + 50; // ゴミ/タップ点を視界中心へ
+    const g = litter.makeLitter(stx, sty, 2, 0.5);
+    const consumed = scenario.tapWorld(g.x, g.y);
+    const garb = scenario.events.filter((e) => e.id === 'garbage');
+    if (!consumed) fail('U1: ゴミのタップが消費されない');
+    if (garb.length !== 1) fail(`U1: タップで収集車イベントが 1 つにならない (${garb.length})`);
+    else {
+      const ev = garb[0];
+      if (!ev.truck || ev.truck.role !== 'garbage') fail('U1: スポーンした車がゴミ収集車でない');
+      if (ev.dest !== g) fail('U1: タップしたゴミが目的地に設定されない');
+      if (typeof ev.truck.steer !== 'function') fail('U1: 収集車がゴミへ向かう操舵を持たない');
+      // U2: 再タップしても収集車は 1 台のまま (同じ車を誘導)
+      const id0 = ev.truck.id;
+      scenario.tapWorld(g.x, g.y);
+      const garb2 = scenario.events.filter((e) => e.id === 'garbage');
+      if (garb2.length !== 1) fail(`U2: 再タップで収集車が増えた (${garb2.length})`);
+      if (garb2[0].truck.id !== id0) fail('U2: 再タップで別の収集車になった');
+    }
+    clearAll(); ls.splice(0, ls.length); scenario.events.length = 0;
+    console.log('検証U: タップで誘導 / 不在ならスポーン / 同時 1 台 OK');
+  }
+}
+
+// ---- 検証 W: 対向車線のゴミでも、走行車線の路肩へ寄せて (aside) 回収する (req: 対向側も寄せて回収) ----
+{
+  const vs = vehicles.vehicles, ls = litter.litter;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  ls.splice(0, ls.length); clearAll(); scenario.events.length = 0;
+  let stx, sty;
+  for (let ty = -30; ty <= 30 && stx === undefined; ty++) for (let tx = -30; tx <= 30; tx++) {
+    const ti = tileInfo(tx, ty);
+    if (ti.road && !ti.junction && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; break; }
+  }
+  camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
+  const ev = scenario.forceSpawn(t, 'garbage');
+  if (ev && ev.truck && stx !== undefined) {
+    const truck = ev.truck, lp = lanePath(0, 2);
+    truck.tx = stx; truck.ty = sty; truck.din = 0; truck.dout = 2; truck.path = lp; truck.s = lp.len * 0.25; truck.steer = null;
+    truck.speed = truck.vmax || 20; vehicles.repositionVehicle(truck);
+    const g = litter.makeLitter(stx, sty, 0, 0.6); // 北向きの左路肩 = 南進の収集車から見て対向 (右) 側
+    scenario.tapWorld(g.x, g.y);                    // タップで誘導 (対向側のゴミ)
+    if (ev.dest !== g) fail('W: タップしたゴミが目的地に設定されない');
+    let collected = false, asideWhenCollected = null;
+    for (let f = 0; f < 420 && !collected; f++) {
+      camera.cam.x = truck.x; camera.cam.y = truck.y;
+      const asideAt = truck.aside, had = ls.indexOf(g) >= 0;
+      ev.update(1 / 60, t); vehicles.updateAll(1 / 60); t += 1000 / 60;
+      if (had && ls.indexOf(g) < 0) { collected = true; asideWhenCollected = asideAt; }
+    }
+    if (!collected) fail('W: 対向側のゴミが回収されない');
+    if (asideWhenCollected === false) fail('W: 路肩へ寄せずに (aside でない) 対向側のゴミを回収した');
+    clearAll(); ls.splice(0, ls.length); scenario.events.length = 0;
+    console.log('検証W: 対向車線のゴミも走行車線の路肩へ寄せて回収 OK');
+  } else fail('W: ゴミ収集車をスポーンできない');
+}
+
+// ---- 検証 V: 視界内のゴミが描画される (drawScene がゴミ袋を描く / クラッシュしない) ----
+{
+  const calls = [];
+  const recNames = new Set(['setTransform', 'scale', 'arc', 'roundRect', 'rect', 'fillRect', 'beginPath', 'fill', 'save', 'restore', 'translate', 'rotate', 'moveTo', 'lineTo', 'closePath', 'clearRect', 'stroke', 'strokeRect', 'setLineDash', 'ellipse']);
+  const recCtx = new Proxy({}, { get: (_t, p) => recNames.has(p) ? (...a) => { calls.push([p, a]); } : undefined, set: () => true });
+  render.initRender({ getContext: () => recCtx });
+  camera.setViewport(1200, 800, 2);
+  const ls = litter.litter; ls.splice(0, ls.length);
+  let stx, sty;
+  for (let ty = -30; ty <= 30 && stx === undefined; ty++) for (let tx = -30; tx <= 30; tx++) {
+    const ti = tileInfo(tx, ty);
+    if (ti.road && !ti.junction && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; break; }
+  }
+  camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
+  const g = litter.makeLitter(stx, sty, 2, 0.5);
+  camera.cam.x = g.x; camera.cam.y = g.y; // ゴミを視界中心へ
+  calls.length = 0; render.drawScene();
+  const ellipses = calls.filter((c) => c[0] === 'ellipse').length; // ゴミ袋の影 = ellipse
+  if (ellipses < 1) fail('V: 視界内のゴミが描画されない (ellipse 呼び出しが無い)');
+  ls.splice(0, ls.length);
+  console.log('検証V: 視界内のゴミ袋が描画される OK');
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
