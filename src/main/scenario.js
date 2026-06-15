@@ -21,7 +21,7 @@ import { DX, DY, OPP, TILE } from './config.js';
 import { vehicles, makeVehicle, removeVehicle, repositionVehicle, pullOver, returnToLane } from './vehicles.js';
 import { tileInfo } from './map.js';
 import { rect } from './camera.js';
-import { litter, nearestLitter, collectAround, setHighlight, clearHighlight } from './litter.js';
+import { litter, nearestLitter, collectAround, removeLitter, setHighlight, clearHighlight } from './litter.js';
 import { addRipple } from './effects.js';
 
 // 出来事の発生間隔 (秒)。次の発生までこの範囲のランダム時間あける = 稀。
@@ -324,45 +324,61 @@ registerEvent({ id: 'chase', weight: 1, spawn: spawnChase });
 // ただ走る。ゴミをタップするとそのゴミがハイライトされ目的地になる (居なければスポーンして向かう)。
 // =====================================================================
 const GARBAGE_PULLOVER_R = 14;  // 目的地のゴミがこの沿道距離 (前方) に来たら路肩へ寄せ始める (= 寄せ切ると停止して回収)
-const GARBAGE_COLLECT_R = 36;   // 路肩へ寄せ切った収集車がこの距離内のゴミを回収 (道路幅をまたいで対向路肩も届く)
+const GARBAGE_COLLECT_R = 40;   // 路肩へ寄せ切った収集車がこの距離内のゴミを回収 (道路幅をまたいで対向路肩も届く / 並行路≧約66 は届かない)
+const GARBAGE_LANE_R = 44;      // この横 (車線差) 距離内のゴミだけ対象 (同じ道路の両車線=最大約34。並行する別の道路≧約66 は除外)
 const GARBAGE_DRIVE_VMAX = 28;  // 通常走行速度 (トラックなので控えめ)
 const GARBAGE_COLLECT_SPEED = 6;// 回収位置まで路肩を詰める徐行速度 (寄せ切れば aside で停止)
+const GARBAGE_COLLECT_DELAY = 1.0; // 路肩へ寄せ切ってから回収するまでの待ち (秒。路肩作業の演出)
 const GARBAGE_MAX_LIFE = 90000; // 安全策: この時間で打ち切り (ms)
 const GARBAGE_TAP_R = 40;       // タップ点からこの距離内のゴミを「タップした」とみなす
 
-// 目的地のゴミが「回収できる距離」に来たか。対向車線のゴミも走行車線のゴミと同じ距離で回収可能に
-// するため、横 (車線差) は問わず進行軸 (沿道) 方向の距離だけで判定する。直線タイル上のみ (寄せは直線限定)。
-// 真横手前 PULLOVER_R で寄せ始め、寄せ切って停止したあと真横〜後方 COLLECT_R までは寄せたまま回収する。
+// 目的地のゴミが「回収できる距離」に来たか。直線タイル上のみ (寄せは直線限定)。
+// - 沿道 (進行軸) 方向: 真横手前 PULLOVER_R で寄せ始め、寄せ切って停止後は真横〜後方 COLLECT_R まで寄せたまま。
+//   対向車線のゴミも走行車線のゴミと同じ沿道距離で回収可能にするため、横 (車線差) は距離に含めない。
+// - 横 (車線差) 方向: LANE_R 内に限る → 同じ道路の両車線 (最大約34) だけを対象にし、並行する別の道路
+//   (横に1タイル以上=約66 離れる) のゴミでは走行中の道路で寄せない (= 別の道路へ向かって走り続ける)。
 function destReachable(truck, g) {
   const ti = tileInfo(Math.floor(truck.x / TILE), Math.floor(truck.y / TILE));
   if (!isStraightTile(ti)) return false;
   const rx = g.x - truck.x, ry = g.y - truck.y;
-  const fwd = rx * truck.hx + ry * truck.hy;        // 進行軸 (沿道) 方向の距離。横 (車線差) は問わない
+  const fwd = rx * truck.hx + ry * truck.hy;          // 進行軸 (沿道) 方向の距離
+  const lat = Math.abs(rx * truck.hy - ry * truck.hx); // 横 (車線差) 方向の距離
+  if (lat > GARBAGE_LANE_R) return false;             // 並行する別の道路のゴミは対象外
   return fwd < GARBAGE_PULLOVER_R && fwd > -GARBAGE_COLLECT_R;
 }
 
 function makeGarbageEvent(truck, now) {
   return {
-    id: 'garbage', truck, t0: now, seen: false, done: false, dest: null,
+    id: 'garbage', truck, t0: now, seen: false, done: false, dest: null, asideT: 0,
     cleanup() { clearHighlight(); }, // 出来事終了時にハイライトを残さない
     update(dt, t) {
       if (vehicles.indexOf(truck) < 0) { clearHighlight(); this.done = true; return; } // グリッドロック撤去等で消えた
       // ハイライトされた目的地があるときだけ動く。回収できる距離まで来たら走行車線の路肩へ寄せ (停止し)、
-      // 寄せ切った (aside) ら回収する (req: 路肩に寄せずに回収しない / 対向車線でも自車線の路肩で回収)。
+      // 寄せ切った (aside) ら少し待って回収する (req: 路肩に寄せずに回収しない / 対向車線でも自車線の路肩で回収)。
       // ハイライトが無ければ探索せずただ走る (req: 操作なしに探索しない)。
       if (this.dest && litter.indexOf(this.dest) >= 0) {
         if (destReachable(truck, this.dest)) {
           pullOver(truck);
           truck.vmax = GARBAGE_COLLECT_SPEED;
-          if (truck.aside) collectAround(truck.x, truck.y, GARBAGE_COLLECT_R);
+          if (truck.aside) {
+            // 寄せ切ってから COLLECT_DELAY 待って回収 (路肩作業の演出)。目的地は確実に、近くの同じ道路の
+            // ゴミ (走行車線・対向車線の両方) もまとめて回収する。
+            this.asideT += dt;
+            if (this.asideT >= GARBAGE_COLLECT_DELAY) {
+              removeLitter(this.dest);
+              collectAround(truck.x, truck.y, GARBAGE_COLLECT_R);
+            }
+          } else this.asideT = 0; // 寄せ切る前 (徐行中) はカウントしない
         } else {
           returnToLane(truck);
           truck.vmax = GARBAGE_DRIVE_VMAX;
+          this.asideT = 0;
         }
       } else {
         if (this.dest) { this.dest = null; truck.steer = null; clearHighlight(); } // 回収/消滅 → 誘導解除
         returnToLane(truck);
         truck.vmax = GARBAGE_DRIVE_VMAX;
+        this.asideT = 0;
       }
       // 視界に一度入ったか → 入った後に視界外へ十分離れたら撤去 (チェイスと同様)。
       // 特別車は画面表示中はデスポーンさせない → 撤去は必ず画面外のときだけ (寿命超過の安全策も画面外限定)。
