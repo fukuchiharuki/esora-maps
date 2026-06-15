@@ -11,7 +11,7 @@ import * as camera from '../main/camera.js';
 import * as vehicles from '../main/vehicles.js';
 import * as scenario from '../main/scenario.js';
 import * as render from '../main/render.js';
-import { DX, DY, OPP, TILE } from '../main/config.js';
+import { DX, DY, OPP, TILE, ROAD_W, MIN_ZOOM, MAX_ZOOM } from '../main/config.js';
 import { writeFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -290,7 +290,7 @@ let t = 1000;
 // ---- 検証 G: 発生アイコンが右下に描画される (呼び出し記録コンテキスト) ----
 {
   const calls = [];
-  const recNames = new Set(['setTransform', 'arc', 'roundRect', 'rect', 'fillRect', 'strokeRect', 'beginPath', 'fill', 'stroke', 'save', 'restore', 'translate', 'rotate', 'moveTo', 'lineTo', 'setLineDash', 'ellipse', 'closePath', 'clearRect']);
+  const recNames = new Set(['setTransform', 'scale', 'arc', 'roundRect', 'rect', 'fillRect', 'strokeRect', 'beginPath', 'fill', 'stroke', 'save', 'restore', 'translate', 'rotate', 'moveTo', 'lineTo', 'setLineDash', 'ellipse', 'closePath', 'clearRect']);
   const recCtx = new Proxy({}, { get: (_t, p) => recNames.has(p) ? (...a) => { calls.push([p, a]); } : undefined, set: () => true });
   render.initRender({ getContext: () => recCtx });
   camera.setViewport(1200, 800, 2); camera.placeCamera();
@@ -675,6 +675,40 @@ process.stdout.write(s);\n`);
     clearAll();
     console.log('検証P: 退避は走行車両が接近中は維持・いなくなったら復帰 OK');
   }
+}
+
+// ---- 検証 Q: 引きにするほど車両を大きく描く (描画専用 / 当たり判定 len・wid は不変) ----
+{
+  const calls = [];
+  const recNames = new Set(['setTransform', 'scale', 'arc', 'roundRect', 'rect', 'fillRect', 'beginPath', 'fill', 'save', 'restore', 'translate', 'rotate', 'moveTo', 'lineTo', 'closePath', 'clearRect', 'stroke', 'strokeRect', 'setLineDash', 'ellipse']);
+  const recCtx = new Proxy({}, { get: (_t, p) => recNames.has(p) ? (...a) => { calls.push([p, a]); } : undefined, set: () => true });
+  render.initRender({ getContext: () => recCtx });
+  camera.setViewport(1200, 800, 2);
+  const vs = vehicles.vehicles; vs.splice(0, vs.length);
+  const car = vehicles.makeVehicle(0, 0, 0, 2, false);
+  car.x = 0; car.y = 0; vs.push(car);
+  const len0 = car.len, wid0 = car.wid;
+  // drawScene 内で車両に対して呼ばれる ctx.scale(s,s) の s を取り出す (車両描画専用スケール)
+  const drawScaleAt = (zoom) => {
+    camera.placeCamera(); camera.zoomAt(600, 400, zoom);
+    camera.cam.x = car.x; camera.cam.y = car.y; // 車をビュー中心に (高ズームでも視界内に入れる)
+    calls.length = 0; render.drawScene();
+    const sc = calls.find((c) => c[0] === 'scale');
+    return sc ? sc[1][0] : null;
+  };
+  const sNear = drawScaleAt(MAX_ZOOM);
+  const sFar = drawScaleAt(MIN_ZOOM);
+  vs.splice(0, vs.length);
+  console.log(`検証Q: 描画スケール 最寄り${sNear?.toFixed(2)} → 最引き${sFar?.toFixed(2)} (片車線=${ROAD_W / 2}, 最引き幅≒${(wid0 * sFar).toFixed(1)})`);
+  if (sNear == null || sFar == null) fail('Q: 車両描画スケールが取得できない');
+  else {
+    if (Math.abs(sNear - 1) > 0.01) fail(`Q: 最寄りで実寸でない (s=${sNear.toFixed(2)})`);          // 最寄り=現状どおり
+    if (!(sFar > sNear + 0.3)) fail(`Q: 引きで大きくならない (最寄り${sNear.toFixed(2)} 最引き${sFar.toFixed(2)})`);
+    const farW = wid0 * sFar;                                                                          // 最引きの表示幅
+    if (!(farW > ROAD_W / 2 && farW < ROAD_W)) fail(`Q: 最引きが片車線を超える〜道路幅未満でない (幅${farW.toFixed(1)} / 片車線${ROAD_W / 2} 〜 道路${ROAD_W})`);
+  }
+  if (car.len !== len0 || car.wid !== wid0) fail('Q: 描画で当たり判定サイズ (len/wid) が変わった');
+  console.log('検証Q: 引きで拡大・最寄りは実寸・len/wid 不変 OK');
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);

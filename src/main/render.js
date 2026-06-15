@@ -8,7 +8,7 @@
 //    カーブ・T字・十字の右左折パスを舗装上に収める。
 //  - 車両 (画面内のみ)
 // =====================================================================
-import { TILE, ROAD_W, SIDE_W, LANE_OFF, DX, DY } from './config.js';
+import { TILE, ROAD_W, SIDE_W, LANE_OFF, DX, DY, MIN_ZOOM, MAX_ZOOM } from './config.js';
 import { hash, rnd01 } from './rng.js';
 import { tileInfo } from './map.js';
 import { vehicles } from './vehicles.js';
@@ -159,10 +159,21 @@ function drawRoadDetail(tile) {
   }
 }
 
+// 引き (低ズーム) ほど車両を大きく描く描画専用スケール。最寄り (MAX_ZOOM) = 実寸 (現状どおり)、
+// 最引き (MIN_ZOOM) = 片車線 (ROAD_W/2=18) を超える程度。len/wid は変えないので当たり判定には影響しない。
+const VEHICLE_DRAW_SCALE_MAX = 3.0; // 乗用車 幅7.5 × 3.0 ≒ 22.5 ≒ 片車線 18 をしっかり超える
+function vehicleDrawScale() {
+  const t = (MAX_ZOOM - cam.zoom) / (MAX_ZOOM - MIN_ZOOM); // 0 = 最寄り … 1 = 最引き
+  const c = t < 0 ? 0 : t > 1 ? 1 : t;
+  return 1 + c * (VEHICLE_DRAW_SCALE_MAX - 1);
+}
+
 function drawVehicle(v) {
   const flash = (performance.now() % 440) < 220; // 赤青灯の点滅位相
   ctx.save();
   ctx.translate(v.x, v.y);
+  const ds = vehicleDrawScale();
+  ctx.scale(ds, ds); // 引きほど大きく (描画専用 / 当たり判定は len・wid のまま)
   // パトカーのサイレン光 (無回転の円なので rotate 前に描く)
   if (v.role === 'police') {
     ctx.fillStyle = flash ? 'rgba(70,120,255,0.28)' : 'rgba(255,70,70,0.28)';
