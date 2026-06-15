@@ -13,6 +13,7 @@ import { hash, rnd01 } from './rng.js';
 import { tileInfo } from './map.js';
 import { vehicles } from './vehicles.js';
 import { litter } from './litter.js';
+import { effects, RIPPLE_DUR } from './effects.js';
 import { cam, view, rect, setViewport } from './camera.js';
 
 let canvas = null, ctx = null;
@@ -170,13 +171,23 @@ function vehicleDrawScale() {
 }
 
 // 路肩のゴミ袋 (車両以外のオブジェクト)。車両と同じく引きで大きく描く (タップしやすく)。
+// ハイライト中 (収集車の目的地) はゆっくり「ピョーンピョーン」と跳ね、強調リングを添える。
 function drawLitter(g) {
   ctx.save();
   ctx.translate(g.x, g.y);
   const ds = vehicleDrawScale();
   ctx.scale(ds, ds);
-  ctx.fillStyle = 'rgba(0,0,0,0.18)';                       // 影
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';                       // 影 (地面に残り跳ねない)
   ctx.beginPath(); ctx.ellipse(0.6, 1.6, 4.4, 2.4, 0, 0, Math.PI * 2); ctx.fill();
+  let bounce = 0;
+  if (g.hl) {                                              // ハイライト: 強調リング + ゆっくり上下に跳ねる
+    const ph = (performance.now() % 900) / 900;            // 0..1 のループ (ゆっくり)
+    bounce = -Math.abs(Math.sin(ph * Math.PI)) * 5;        // 上方向へピョーン
+    ctx.strokeStyle = 'rgba(126,200,220,0.9)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.translate(0, bounce);                                // 袋本体だけ跳ねる (影は残す)
   ctx.fillStyle = '#86cfe0';                                // 水色のゴミ袋
   ctx.beginPath();
   if (ctx.roundRect) ctx.roundRect(-4, -3.5, 8, 7, 3); else ctx.rect(-4, -3.5, 8, 7);
@@ -184,6 +195,19 @@ function drawLitter(g) {
   ctx.fillStyle = '#5aa6b8';                                // 結び目 (濃いめの水色)
   ctx.beginPath(); ctx.moveTo(-2, -3.2); ctx.lineTo(0, -5); ctx.lineTo(2, -3.2); ctx.closePath(); ctx.fill();
   ctx.restore();
+}
+
+// タップ波紋 (共通の視覚エフェクト)。ワールド座標で広がりながら薄れる白い輪。線幅は画面上で一定。
+function drawEffects() {
+  if (!effects.length) return;
+  const now = performance.now();
+  for (const e of effects) {
+    const p = (now - e.t0) / RIPPLE_DUR;                   // 0..1 の進捗
+    if (p < 0 || p > 1) continue;
+    ctx.strokeStyle = `rgba(255,255,255,${(1 - p) * 0.8})`;
+    ctx.lineWidth = 2 / cam.zoom;                          // 画面上で一定の太さ
+    ctx.beginPath(); ctx.arc(e.x, e.y, 6 + p * 26, 0, Math.PI * 2); ctx.stroke();
+  }
 }
 
 function drawVehicle(v) {
@@ -378,5 +402,6 @@ export function drawScene() {
     if (v.x >= wx0 && v.x <= wx1 && v.y >= wy0 && v.y <= wy1) drawVehicle(v);
   }
 
+  drawEffects();    // タップ波紋 (共通の視覚エフェクト・ワールド座標)
   drawChaseIcons(); // HUD: カーチェイス発生アイコン (右下)
 }

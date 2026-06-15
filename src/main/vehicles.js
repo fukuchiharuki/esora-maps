@@ -203,6 +203,11 @@ function updateVehicle(v, dt) {
   // ---- 路肩へ寄せている間は道を譲って減速 (停止)
   if (v.role === null && v.latTarget > 0) target = Math.min(target, YIELD_SPEED);
 
+  // ---- 路肩に寄せ切った (aside) まま路肩へ留まる (latTarget>0) 車両は移動できない (req: 路肩寄せ中は
+  // 動けない)。寄せる途中 (aside 前) は徐行可 → 収集車が回収位置まで詰める。車線へ戻る最中 (latTarget=0)
+  // は寄せ解除なので対象外 → 従来どおり車線へ復帰できる。確保車は vmax=0 でもとより停止。
+  if (v.aside && v.latTarget > 0) target = Math.min(target, 0);
+
   // ---- 交差点進入待ち
   // 予約の「取得」は実際に踏み込む瞬間 (遷移処理) だけで行う。接近フェーズではここで
   // 取得しない。これにより交差点の外で予約を握ったまま前方車に詰まる hold-and-wait が
@@ -306,8 +311,10 @@ export function manageVehicles(now) {
     const v = vehicles[i];
     // 視界外なら撤去。視界内でも 12 秒以上完全停止ならグリッドロックとみなし撤去するが、
     // parked (確保) や aside (路肩へ寄せ中=道を譲って待機) は意図的な停止なので対象外。
+    // 特別な車両 (role!==null: パト/逃走車/収集車) は画面表示中はデスポーンさせない → グリッドロック
+    // 撤去は通常車 (role===null) のみ。特別車は画面外 (offView) でだけ撤去される。
     const offView = v.x < wx0 || v.x > wx1 || v.y < wy0 || v.y > wy1;
-    if (offView || (v.stuckT > 12 && !v.parked && !v.aside)) {
+    if (offView || (v.stuckT > 12 && !v.parked && !v.aside && v.role === null)) {
       releaseVehicle(v);
       vehicles.splice(i, 1);
     }

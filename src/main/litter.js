@@ -11,7 +11,7 @@ import { TILE, DX, DY, LANE_OFF } from './config.js';
 import { tileInfo } from './map.js';
 import { rect } from './camera.js';
 
-export const litter = []; // { id, x, y, dir }  dir = この袋を回収できる走行方向 (その左路肩に置く)
+export const litter = []; // { id, x, y, dir, hl }  dir = この袋を回収できる走行方向 (その左路肩に置く) / hl = ハイライト中
 let litterId = 0;
 
 const SHOULDER_LAT = LANE_OFF + 8; // 車線中心からゴミ (= 寄せた収集車) までの横距離 ≒ 17
@@ -37,7 +37,7 @@ function litterLocal(dir, along) {
 // 直線タイル (tx,ty) の、通行方向 dir の左路肩にゴミを作る。
 export function makeLitter(tx, ty, dir, along = 0.5) {
   const p = litterLocal(dir, along);
-  const g = { id: ++litterId, x: tx * TILE + p.x, y: ty * TILE + p.y, dir };
+  const g = { id: ++litterId, x: tx * TILE + p.x, y: ty * TILE + p.y, dir, hl: false };
   litter.push(g);
   return g;
 }
@@ -45,6 +45,15 @@ export function makeLitter(tx, ty, dir, along = 0.5) {
 export function removeLitter(g) {
   const i = litter.indexOf(g);
   if (i >= 0) litter.splice(i, 1);
+}
+
+// ハイライト (収集車が目的地にしているゴミ) は一度に 1 つ。render が「ゆっくり跳ねる」演出に使う。
+// g=null で全解除。タップでの誘導切替・回収/誘導解除のたびに呼ぶ (常に最新の目的地だけが光る)。
+export function setHighlight(g) {
+  for (const o of litter) o.hl = (o === g);
+}
+export function clearHighlight() {
+  for (const o of litter) o.hl = false;
 }
 
 // (x,y) に最も近いゴミを maxR 以内で返す (タップのヒットテスト用)。無ければ null。
