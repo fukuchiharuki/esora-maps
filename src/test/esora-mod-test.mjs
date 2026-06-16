@@ -302,42 +302,111 @@ const forceGarbage = () => {
   vehicles.removeVehicle(f); vehicles.removeVehicle(p); s = render.chaseIconState();
   if (s.flee || s.police) fail('F: デスポーンでアイコンが消えない');
   const tr = mk('garbage'); s = render.chaseIconState();
-  if (!s.garbage) fail('F: 収集車スポーンでアイコン(収集車)が出ない');
+  if (s.garbage) fail('F: 目的地の無い収集車でアイコンが出る');         // targeting=false → 非表示
+  tr.targeting = true; s = render.chaseIconState();
+  if (!s.garbage) fail('F: 目的地へ向かう収集車でアイコンが出ない');    // targeting=true → 表示
+  tr.targeting = false; s = render.chaseIconState();
+  if (s.garbage) fail('F: 回収後 (目的地無し) も収集車アイコンが残る'); // 回収後 → 非表示
   vehicles.removeVehicle(tr); s = render.chaseIconState();
   if (s.garbage) fail('F: 収集車デスポーンでアイコンが消えない');
-  console.log('検証F: アイコンは 昇格/スポーン/収集車で表示・無力化(確保)/デスポーンで非表示 OK');
+  console.log('検証F: アイコンは 昇格/スポーン表示・収集車は目的地のある間のみ・無力化/デスポーンで非表示 OK');
 }
 
-// ---- 検証 G: 発生アイコンが右下に描画される (呼び出し記録コンテキスト) ----
+// ---- 検証 G: 特別車の位置インジケータ (画面外=端にアイコン[車両座標に合わせる] / 画面内=ハイライト) ----
+{
+  camera.setViewport(1200, 800, 2); camera.placeCamera(); camera.zoomAt(600, 400, 1);
+  const W = 1200, H = 800, z = camera.cam.zoom, cx = camera.cam.x, cy = camera.cam.y;
+  const vs = vehicles.vehicles; vs.splice(0, vs.length);
+  const worldAt = (sx, sy) => ({ x: cx + (sx - W / 2) / z, y: cy + (sy - H / 2) / z }); // 指定スクリーン座標に来るワールド座標
+  const place1 = (role, sx, sy) => {
+    vs.splice(0, vs.length);
+    const v = vehicles.makeVehicle(0, 0, 0, 2, false); v.role = role; v.targeting = true; // 収集車も対象に
+    const w = worldAt(sx, sy); v.x = w.x; v.y = w.y; vs.push(v);
+    return render.targetIndicators()[0];
+  };
+  // G1: 画面内 → onScreen (端アイコンは出さない)
+  if (!place1('police', W / 2, H / 2)?.onScreen) fail('G1: 画面内の特別車が onScreen と判定されない');
+  // G2: x が画面外 (左) → x は左端へ寄せ、y は車両に合わせる
+  {
+    const ind = place1('flee', -50, H / 2);
+    if (ind.onScreen) fail('G2: 画面外なのに onScreen');
+    if (!(ind.ix < 60)) fail(`G2: x が左端に寄らない (ix=${ind.ix.toFixed(0)})`);
+    if (Math.abs(ind.iy - H / 2) > 1) fail(`G2: y が車両に合っていない (iy=${ind.iy.toFixed(0)})`);
+  }
+  // G3: y が画面外 (上) → y は上端へ寄せ、x は車両に合わせる
+  {
+    const ind = place1('garbage', W / 2, -50);
+    if (ind.onScreen) fail('G3: 画面外なのに onScreen');
+    if (!(ind.iy < 60)) fail(`G3: y が上端に寄らない (iy=${ind.iy.toFixed(0)})`);
+    if (Math.abs(ind.ix - W / 2) > 1) fail(`G3: x が車両に合っていない (ix=${ind.ix.toFixed(0)})`);
+  }
+  // G4: x,y とも画面外 → 画面端 (角)
+  {
+    const ind = place1('police', -50, -50);
+    if (ind.onScreen) fail('G4: 画面外なのに onScreen');
+    if (!(ind.ix < 60 && ind.iy < 60)) fail(`G4: 角に寄らない (ix=${ind.ix.toFixed(0)}, iy=${ind.iy.toFixed(0)})`);
+  }
+  // G5/G6 (描画): 画面外 → 画面端に白丸アイコン (R=21, HUD座標) / 画面内 → アイコンを出さない
+  {
+    const calls = [];
+    const recNames = new Set(['setTransform', 'scale', 'arc', 'roundRect', 'rect', 'fillRect', 'strokeRect', 'beginPath', 'fill', 'stroke', 'save', 'restore', 'translate', 'rotate', 'moveTo', 'lineTo', 'setLineDash', 'ellipse', 'closePath', 'clearRect']);
+    const recCtx = new Proxy({}, { get: (_t, p) => recNames.has(p) ? (...a) => { calls.push([p, a]); } : undefined, set: () => true });
+    render.initRender({ getContext: () => recCtx });
+    const isHud = (c) => c[0] === 'setTransform' && c[1][4] === 0 && c[1][5] === 0 && c[1][0] === 2;
+    const iconArcs = () => calls.filter((c) => c[0] === 'arc' && Math.abs(c[1][2] - 21) < 0.01);
+    place1('police', -200, H / 2); // 画面外 (左)
+    calls.length = 0; render.drawScene();
+    if (calls.findIndex(isHud) < 0) fail('G5: 画面外の対象で HUD アイコン描画が走らない');
+    const icon = iconArcs()[0];
+    if (!icon) fail('G5: 画面端の白丸アイコン (R=21) が描かれない');
+    else if (!(icon[1][0] < 60)) fail(`G5: アイコンが左端に置かれていない (x=${icon[1][0].toFixed(0)})`);
+    place1('police', W / 2, H / 2); // 画面内
+    calls.length = 0; render.drawScene();
+    if (calls.some(isHud)) fail('G6: 画面内の対象なのに HUD アイコン描画が走った');
+    if (iconArcs().length) fail('G6: 画面内の対象にアイコン (R=21) を描いた');
+  }
+  // G7: 収集車は目的地 (targeting) が無ければインジケータを出さない (向かって回収する間だけ)
+  {
+    vs.splice(0, vs.length);
+    const v = vehicles.makeVehicle(0, 0, 0, 2, false); v.role = 'garbage'; v.targeting = false; v.x = cx; v.y = cy;
+    vs.push(v);
+    if (render.targetIndicators().length !== 0) fail('G7: 目的地の無い収集車にインジケータが出た');
+    v.targeting = true;
+    if (render.targetIndicators().length !== 1) fail('G7: 目的地のある収集車にインジケータが出ない');
+  }
+  vs.splice(0, vs.length);
+  console.log('検証G: 特別車の位置インジケータ (画面外=端/画面内=ハイライト・収集車は目的地ある間のみ) OK');
+}
+
+// ---- 検証 AG: 車両のハイライトは役割・車体長によらず同じ大きさ (収集車もパト/逃走車と同じ) ----
 {
   const calls = [];
   const recNames = new Set(['setTransform', 'scale', 'arc', 'roundRect', 'rect', 'fillRect', 'strokeRect', 'beginPath', 'fill', 'stroke', 'save', 'restore', 'translate', 'rotate', 'moveTo', 'lineTo', 'setLineDash', 'ellipse', 'closePath', 'clearRect']);
   const recCtx = new Proxy({}, { get: (_t, p) => recNames.has(p) ? (...a) => { calls.push([p, a]); } : undefined, set: () => true });
   render.initRender({ getContext: () => recCtx });
-  camera.setViewport(1200, 800, 2); camera.placeCamera();
-  const vs = vehicles.vehicles; vs.splice(0, vs.length);
-  const isHud = (c) => c[0] === 'setTransform' && c[1][4] === 0 && c[1][5] === 0 && c[1][0] === 2;
-  calls.length = 0; render.drawScene();
-  if (calls.some(isHud)) fail('G: チェイス不在なのに HUD 描画が走った');
-  const mk = (role) => { const v = vehicles.makeVehicle(0, 0, 0, 2, false); v.role = role; vs.push(v); };
-  mk('flee'); mk('police');
-  calls.length = 0; render.drawScene();
-  const hudIdx = calls.findIndex(isHud);
-  if (hudIdx < 0) fail('G: HUD のスクリーン座標変換が無い');
-  else {
-    const after = calls.slice(hudIdx);
-    const circles = after.filter((c) => c[0] === 'arc' && Math.abs(c[1][2] - 21) < 0.01);
-    const br = circles.filter((c) => c[1][0] > 1000 && c[1][1] > 700);
-    if (circles.length < 2) fail(`G: 白丸が2つ以上描かれない (${circles.length})`);
-    if (br.length < 2) fail('G: アイコンが右下に配置されていない');
-  }
-  mk('garbage'); // 収集車も加わると右下のアイコンが 1 つ増える
-  calls.length = 0; render.drawScene();
-  const hi = calls.findIndex(isHud);
-  const circles3 = hi < 0 ? [] : calls.slice(hi).filter((c) => c[0] === 'arc' && Math.abs(c[1][2] - 21) < 0.01);
-  if (circles3.length < 3) fail(`G: 収集車のアイコンが増えない (${circles3.length})`);
+  camera.setViewport(1200, 800, 2); camera.placeCamera(); camera.zoomAt(600, 400, 1);
+  const vs = vehicles.vehicles, cx = camera.cam.x, cy = camera.cam.y;
+  // 画面中央 (画面内) に 1 台置き、車両ローカル中心 (0,0) に描かれる円弧半径を集める。
+  const centerArcs = (role, len) => {
+    vs.splice(0, vs.length);
+    const v = vehicles.makeVehicle(0, 0, 0, 2, false);
+    v.role = role; v.targeting = true; v.len = len; v.x = cx; v.y = cy; vs.push(v);
+    calls.length = 0; render.drawScene();
+    return calls.filter((c) => c[0] === 'arc' && c[1][0] === 0 && c[1][1] === 0).map((c) => c[1][2]);
+  };
+  const gb = centerArcs('garbage', 20); // 収集車: サイレン光なし → ハイライトのみ
+  const gb2 = centerArcs('garbage', 40); // 車体長を変えても
+  const pol = centerArcs('police', 13);  // パト: サイレン光 (len*1.1) + ハイライト
   vs.splice(0, vs.length);
-  console.log('検証G: 発生アイコンは右下に白丸で描画される (収集車含む) OK');
+  if (gb.length !== 1) fail(`AG: 収集車のハイライト円弧が1つでない (${JSON.stringify(gb)})`);
+  else {
+    const rG = gb[0];
+    if (Math.abs(gb2[0] - rG) > 1e-6) fail(`AG: 収集車のハイライトが車体長で変わる (${rG} vs ${gb2[0]})`);
+    const polHi = pol.filter((r) => Math.abs(r - 13 * 1.1) > 0.01); // サイレン光 (14.3) 以外 = ハイライト
+    if (polHi.length !== 1) fail(`AG: パトのハイライト円弧が特定できない (${JSON.stringify(pol)})`);
+    else if (Math.abs(polHi[0] - rG) > 1e-6) fail(`AG: 収集車とパトのハイライトの大きさが違う (収集車${rG} / パト${polHi[0]})`);
+    else console.log(`検証AG: 車両ハイライトは役割・車体長によらず同じ大きさ (R=${rG}) OK`);
+  }
 }
 
 // ---- 検証 H: パトカーは逃走車の進行方向 (前方) からはスポーンしない (正面すれ違い防止) ----

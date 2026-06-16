@@ -369,6 +369,7 @@ function makeGarbageEvent(truck, now) {
       // 寄せ切った (aside) ら少し待って回収する (req: 路肩に寄せずに回収しない / 対向車線でも自車線の路肩で回収)。
       // ハイライトが無ければ探索せずただ走る (req: 操作なしに探索しない)。
       if (this.dest && litter.indexOf(this.dest) >= 0) {
+        truck.targeting = true; // 目的地へ向かって回収するまでの間 → 位置インジケータを出す
         if (destReachable(truck, this.dest)) {
           pullOver(truck);
           truck.vmax = GARBAGE_COLLECT_SPEED;
@@ -388,6 +389,7 @@ function makeGarbageEvent(truck, now) {
         }
       } else {
         if (this.dest) { this.dest = null; truck.steer = null; clearHighlight(); } // 回収/消滅 → 誘導解除
+        truck.targeting = false; // 目的地が無い間は位置インジケータを出さない
         returnToLane(truck);
         truck.vmax = GARBAGE_DRIVE_VMAX;
         this.asideT = 0;
@@ -429,7 +431,7 @@ function spawnGarbage(now) {
   const pick = cands[(Math.random() * cands.length) | 0];
   const truck = makeVehicle(pick.t.tx, pick.t.ty, pick.din, pick.dout, false);
   truck.role = 'garbage'; truck.color = '#7ec8dc'; truck.len = 20; truck.wid = 9;
-  truck.vmax = GARBAGE_DRIVE_VMAX;
+  truck.vmax = GARBAGE_DRIVE_VMAX; truck.targeting = false; // 目的地が出来るまで位置インジケータは出さない
   truck.s = truck.path.len * 0.5; repositionVehicle(truck);
   vehicles.push(truck);
   return makeGarbageEvent(truck, now);

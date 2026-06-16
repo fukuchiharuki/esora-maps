@@ -275,19 +275,51 @@ function drawVehicle(v) {
 }
 
 // =====================================================================
-// HUD: カーチェイス発生アイコン (右下)
+// 特別車 (パト/逃走車/収集車) の位置インジケータ
 //
-// 「乗用車が逃走車に昇格」「パトカーがスポーン」した = イベント発生を知らせる。
-// 白丸の中に逃走車 (黒い車) / パトカー (赤青灯の車) を描く。逃走車・パトカーが
-// 存在する間は出し続け、デスポーン (撤去) または無力化 (確保=parked) され次第消す。
+// 対象車両の位置を知らせる。対象が画面外なら、その方向の画面端にアイコンを出す
+// (車両の座標に合わせる: x が画面外なら y を合わせ、y が画面外なら x を合わせ、両軸とも
+// 外なら画面端=角)。対象が画面内なら、アイコンは出さず車両に白い (透過) ハイライトを描く。
+// 無力化 (確保=parked) された車両は対象外 (知らせ終わり)。収集車は目的地のゴミへ向かって回収する
+// 間だけ対象 (v.targeting)。
 // =====================================================================
+const ICON_R = 21;          // アイコンの白丸半径
+const ICON_MARGIN = ICON_R + 8; // 画面端からの内側マージン (アイコン全体が見えるように)
+const HIGHLIGHT_R = 15;     // 車両ハイライトの半径 (全車種共通の大きさ。車体長 len には依存しない)
+
+// その車両が位置インジケータの対象 (役割) か。収集車は目的地へ向かう間だけ (targeting)。
+function indicatorKind(v) {
+  if (v.parked) return null;                         // 無力化済みは知らせない
+  if (v.role === 'garbage') return v.targeting ? 'garbage' : null; // 目的地へ向かう間だけ
+  if (v.role === 'flee') return 'flee';
+  if (v.role === 'police') return 'police';
+  return null;
+}
+
+// 各特別車の位置インジケータ情報。onScreen=画面内 (ハイライト) / 画面外 (画面端 ix,iy にアイコン)。
+export function targetIndicators() {
+  const out = [], W = view.cssW, H = view.cssH, z = cam.zoom;
+  for (const v of vehicles) {
+    const kind = indicatorKind(v);
+    if (!kind) continue;
+    const sx = (v.x - cam.x) * z + W / 2, sy = (v.y - cam.y) * z + H / 2; // 車両のスクリーン座標
+    const onScreen = sx >= 0 && sx <= W && sy >= 0 && sy <= H;
+    // 画面端に寄せる (x が範囲内なら x はそのまま=合わせる、外なら端へ。y も同様)
+    const ix = Math.max(ICON_MARGIN, Math.min(W - ICON_MARGIN, sx));
+    const iy = Math.max(ICON_MARGIN, Math.min(H - ICON_MARGIN, sy));
+    out.push({ v, kind, onScreen, ix, iy });
+  }
+  return out;
+}
+
+// 既存テスト互換: 各役割で「位置インジケータの対象車両が居るか」(収集車は targeting のときだけ)。
 export function chaseIconState() {
   let flee = false, police = false, garbage = false;
   for (const v of vehicles) {
-    if (v.role === 'garbage') { garbage = true; continue; } // 収集車は存在する間ずっと表示
-    if (v.parked) continue;              // 無力化 (確保) 済みは知らせ終わり → 非表示
-    if (v.role === 'flee') flee = true;
-    else if (v.role === 'police') police = true;
+    const kind = indicatorKind(v);
+    if (kind === 'flee') flee = true;
+    else if (kind === 'police') police = true;
+    else if (kind === 'garbage') garbage = true;
   }
   return { flee, police, garbage };
 }
@@ -352,19 +384,25 @@ function drawIcon(cx, cy, R, kind) {
   ctx.restore();
 }
 
-function drawChaseIcons() {
-  const st = chaseIconState();
-  if (!st.flee && !st.police && !st.garbage) return;
+// 画面内の対象車両に白い (透過) ハイライトを描く (ワールド座標。車両の上に淡い光輪)。
+// 半径は全車種で共通 (HIGHLIGHT_R) → 収集車もパト/逃走車と同じ大きさ。
+function drawTargetHighlight(v) {
+  ctx.save();
+  ctx.translate(v.x, v.y);
+  const ds = vehicleDrawScale();
+  ctx.scale(ds, ds);
+  ctx.fillStyle = 'rgba(255,255,255,0.30)';
+  ctx.beginPath();
+  ctx.arc(0, 0, HIGHLIGHT_R, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// 画面外の対象車両を、その方向の画面端アイコンで知らせる (スクリーン座標 = CSS px)。
+function drawTargetIcons(list) {
+  if (!list.length) return;
   ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0); // スクリーン座標 (CSS px) に戻す
-  const R = 21, pad = 18, gap = 12;
-  const cy = view.cssH - pad - R;
-  const list = [];                                   // 右端から左へ: パトカー → 逃走車 → 収集車
-  if (st.police) list.push('police');
-  if (st.flee) list.push('flee');
-  if (st.garbage) list.push('garbage');
-  for (let i = 0; i < list.length; i++) {
-    drawIcon(view.cssW - pad - R - i * (2 * R + gap), cy, R, list[i]);
-  }
+  for (const ind of list) drawIcon(ind.ix, ind.iy, ICON_R, ind.kind);
 }
 
 // 1 フレーム分のシーンを描く
@@ -402,6 +440,11 @@ export function drawScene() {
     if (v.x >= wx0 && v.x <= wx1 && v.y >= wy0 && v.y <= wy1) drawVehicle(v);
   }
 
+  // 特別車の位置インジケータ: 画面内 → 車両に白いハイライト (ワールド座標) /
+  //                          画面外 → 画面端にアイコン (スクリーン座標)。
+  const inds = targetIndicators();
+  for (const ind of inds) if (ind.onScreen) drawTargetHighlight(ind.v);
+
   drawEffects();    // タップ波紋 (共通の視覚エフェクト・ワールド座標)
-  drawChaseIcons(); // HUD: カーチェイス発生アイコン (右下)
+  drawTargetIcons(inds.filter(i => !i.onScreen)); // HUD: 画面外の特別車を端のアイコンで指す
 }
