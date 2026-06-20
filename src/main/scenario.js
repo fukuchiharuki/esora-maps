@@ -23,7 +23,7 @@ import { vehicles, makeVehicle, removeVehicle, repositionVehicle, pullOver, retu
 import { tileInfo } from './map.js';
 import { rect, drawScale } from './camera.js';
 import { litterPool } from './litter.js';
-import { mailPool, BUBBLE_DY } from './mail.js';
+import { mailPool, BUBBLE_DY, noteCollected } from './mail.js';
 import { addRipple } from './effects.js';
 
 // 出来事の発生間隔 (秒)。次の発生までこの範囲のランダム時間あける = 稀。
@@ -384,8 +384,10 @@ function makeCollectionEvent(cfg, truck, now) {
             // 対象 (走行車線・対向車線の両方) もまとめて回収する。
             this.asideT += dt;
             if (this.asideT >= COLLECT_DELAY) {
-              pool.remove(this.dest);
-              pool.collectAround(truck.x, truck.y, COLLECT_R);
+              const dest = this.dest;
+              pool.remove(dest);
+              const also = pool.collectAround(truck.x, truck.y, COLLECT_R);
+              if (cfg.onCollect) { cfg.onCollect(dest); for (const o of also) cfg.onCollect(o); } // 回収を種別へ通知 (郵便=再湧き抑制)
             }
           } else this.asideT = 0; // 寄せ切る前 (徐行中) はカウントしない
         } else {
@@ -456,7 +458,8 @@ registerCollector({ id: 'garbage', pool: litterPool, role: 'garbage', color: '#7
 // 郵便回収 (郵便車 = 赤 vs 郵便物)。チェイス/ゴミ収集とは別種なので同時に存在し得る (同種は単一)。
 // iconDY: 郵便物はポスト本体だけでなく、その上の吹き出しアイコン (ポスト点から上に BUBBLE_DY×拡大率)
 // でもタップ可能にする (= ポストでもアイコンでも受け付ける)。
-registerCollector({ id: 'mail', pool: mailPool, role: 'post', color: '#d2362f', len: 18, wid: 8, iconDY: BUBBLE_DY });
+// onCollect: 回収したポストは画面内のうちは再び郵便物を湧かせない (mail.noteCollected)。
+registerCollector({ id: 'mail', pool: mailPool, role: 'post', color: '#d2362f', len: 18, wid: 8, iconDY: BUBBLE_DY, onCollect: noteCollected });
 
 // タップ点 (wx,wy) に最も近い cfg の収集対象を返す ({ g, dd } / 無ければ null)。本体座標に加え、
 // アイコン (吹き出し) を持つ対象 (cfg.iconDY) はアイコン座標 (ポスト点から上に iconDY×拡大率) でも

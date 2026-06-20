@@ -29,14 +29,14 @@ export function createCollectiblePool() {
       }
       return best;
     },
-    // (x,y) 半径 r 内のオブジェクトを回収 (除去)。回収した数を返す。
+    // (x,y) 半径 r 内のオブジェクトを回収 (除去)。回収した要素の配列を返す (件数は .length)。
     collectAround(x, y, r) {
-      let n = 0;
+      const removed = [];
       for (let i = items.length - 1; i >= 0; i--) {
         const o = items[i];
-        if ((o.x - x) ** 2 + (o.y - y) ** 2 <= r * r) { items.splice(i, 1); n++; }
+        if ((o.x - x) ** 2 + (o.y - y) ** 2 <= r * r) { items.splice(i, 1); removed.push(o); }
       }
-      return n;
+      return removed;
     },
     // ハイライト (特別車の目的地) は一度に 1 つ。obj=null で全解除。タップでの誘導切替・
     // 回収/誘導解除のたびに呼ぶ (常に最新の目的地だけが光る)。

@@ -835,7 +835,7 @@ process.stdout.write(s);\n`);
     if (!(Math.abs(lx - 50) <= 18.01 || Math.abs(ly - 50) <= 18.01)) fail(`R: ゴミが路肩 (道路帯) に無い (local ${lx.toFixed(0)},${ly.toFixed(0)})`);
     if (litter.nearestLitter(g.x, g.y, 20) !== g) fail('R: nearestLitter がタップ点近傍のゴミを返さない');
     if (litter.nearestLitter(g.x + 999, g.y, 20) !== null) fail('R: nearestLitter が遠方で null を返さない');
-    if (litter.collectAround(g.x, g.y, 18) !== 1 || ls.length !== 0) fail('R: collectAround で回収されない');
+    if (litter.collectAround(g.x, g.y, 18).length !== 1 || ls.length !== 0) fail('R: collectAround で回収されない');
     console.log('検証R: ゴミ 生成/ヒットテスト/回収 OK');
   }
 }
@@ -1420,7 +1420,7 @@ process.stdout.write(s);\n`);
     if (mp.nearest(g.x, g.y, 20) !== g) fail('AI1: nearest が近傍の郵便物を返さない');
     if (mp.nearest(g.x + 999, g.y, 20) !== null) fail('AI1: nearest が遠方で null を返さない');
     mp.setHighlight(g); if (!g.hl) fail('AI1: setHighlight でハイライトされない');
-    if (mp.collectAround(g.x, g.y, 18) !== 1 || ms.length !== 0) fail('AI1: collectAround で回収されない');
+    if (mp.collectAround(g.x, g.y, 18).length !== 1 || ms.length !== 0) fail('AI1: collectAround で回収されない');
 
     // AI2: manageMail は郵便物をポスト上にだけ湧かせる (湧いた各郵便物が、その所在タイルのポスト点と一致)
     clear();
@@ -1728,6 +1728,63 @@ process.stdout.write(s);\n`);
     if (!ev || ev.dest !== g) fail('AQ2: 吹き出しアイコンのタップで目的地にならない');
     clearAll(); ms.splice(0, ms.length); scenario.events.length = 0;
     console.log('検証AQ: 郵便物はポスト本体でも吹き出しアイコンでもタップできる OK');
+  }
+}
+
+// ---- 検証 AR: 回収後、同じポストには (画面内のうちは) 郵便物が再び湧かない / 画面外へ出ると解除 ----
+{
+  const vs = vehicles.vehicles, ms = mail.mail, ls = litter.litter;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  ms.splice(0, ms.length); ls.splice(0, ls.length); clearAll(); scenario.events.length = 0;
+  // 縦の直線で郵便ポストのあるタイルを探す (郵便車を din=0,dout=2 で走らせて回収できる)
+  let ptx, pty, pdir;
+  for (let ty = -80; ty <= 80 && ptx === undefined; ty++) for (let tx = -80; tx <= 80; tx++) {
+    const ti = tileInfo(tx, ty);
+    if (ti.post && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { ptx = tx; pty = ty; pdir = ti.post.dir; break; }
+  }
+  // ポスト点に郵便物があるか
+  const mailAtPost = () => { const p = shoulderPoint(pdir, 0.5), wx = ptx * TILE + p.x, wy = pty * TILE + p.y;
+    return ms.some(o => (o.x - wx) ** 2 + (o.y - wy) ** 2 < 4 * 4); };
+  // ポストを画面内に置く小さめのビュー
+  const viewOnPost = () => { camera.setViewport(400, 400, 1); camera.cam.zoom = 1; camera.cam.x = ptx * TILE + 50; camera.cam.y = pty * TILE + 50; };
+  if (ptx === undefined) fail('AR: 縦直線の郵便ポストタイルが見つからない');
+  else {
+    // 1) 郵便車を実際に走らせて、このポストの郵便物を回収する (onCollect → 抑制登録)
+    camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
+    const ev = forceMail();
+    if (!ev || !ev.truck) fail('AR: 郵便車をスポーンできない');
+    else {
+      const truck = ev.truck, lp = lanePath(0, 2);
+      truck.tx = ptx; truck.ty = pty; truck.din = 0; truck.dout = 2; truck.path = lp; truck.s = lp.len * 0.2; truck.steer = null;
+      truck.speed = truck.vmax || 20; vehicles.repositionVehicle(truck);
+      const g = mail.makeMail(ptx, pty, pdir);
+      camera.cam.x = truck.x; camera.cam.y = truck.y; scenario.tapWorld(g.x, g.y);
+      let collected = false;
+      for (let f = 0; f < 480 && !collected; f++) {
+        camera.cam.x = truck.x; camera.cam.y = truck.y;
+        ev.update(1 / 60, t); vehicles.updateAll(1 / 60); t += 1000 / 60;
+        if (ms.indexOf(g) < 0) collected = true;
+      }
+      if (!collected) fail('AR: 郵便車がポストの郵便物を回収できない');
+      clearAll(); scenario.events.length = 0; ms.splice(0, ms.length);
+
+      // 2) 画面内のうちは、このポストに郵便物が再び湧かない (回収直後の抑制)
+      viewOnPost();
+      let respawnedWhileOnScreen = false;
+      for (let f = 0; f < 4000; f++) { mail.manageMail(); if (mailAtPost()) { respawnedWhileOnScreen = true; break; } }
+      if (respawnedWhileOnScreen) fail('AR: 回収後・画面内なのに同じポストに郵便物が再び湧いた');
+
+      // 3) ポストが画面表示範囲の外へ出ると抑制解除 → 戻って来れば再び湧ける
+      camera.cam.x = ptx * TILE + 50 + 100 * TILE; // ポストを画面外へ
+      mail.manageMail();                            // 画面外なので抑制解除が走る
+      viewOnPost(); ms.splice(0, ms.length);        // 画面内へ戻す
+      let respawned = false;
+      for (let f = 0; f < 8000 && !respawned; f++) { mail.manageMail(); if (mailAtPost()) respawned = true; }
+      if (!respawned) fail('AR: 画面外に出て戻っても郵便物が再び湧かない (抑制が解除されない)');
+
+      ms.splice(0, ms.length); clearAll(); scenario.events.length = 0;
+      console.log('検証AR: 回収後は同ポストに再湧きせず・画面外へ出ると解除 OK');
+    }
   }
 }
 
