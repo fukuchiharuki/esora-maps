@@ -3,18 +3,21 @@
 //
 // 直線道路の路肩にゴミ袋が湧き、ゴミ収集車 (scenario.js) が回収する。
 // ゴミは「ある方向に走る車の左路肩」に置く (左側通行なので、その方向の収集車が
-// 寄せたときに横へ並ぶ位置)。タップのヒットテストと収集車の回収に使う座標を持つだけ。
+// 寄せたときに横へ並ぶ位置 = roadpart.shoulderPoint)。タップのヒットテストと収集車の
+// 回収・ハイライトは収集プール (collectible.js) に委譲する。
 //
 // 動的コンテンツなので乱数源は Math.random (map.js の決定論とは別。交通・チェイスと同じ扱い)。
 // =====================================================================
-import { TILE, DX, DY, LANE_OFF } from './config.js';
+import { TILE } from './config.js';
+import { shoulderPoint } from './roadpart.js';
 import { tileInfo } from './map.js';
 import { rect } from './camera.js';
+import { createCollectiblePool } from './collectible.js';
 
-export const litter = []; // { id, x, y, dir, hl }  dir = この袋を回収できる走行方向 (その左路肩に置く) / hl = ハイライト中
-let litterId = 0;
+// ゴミの収集プール。litter は items への別名 (既存 API 互換)。要素 = { id, x, y, dir, hl }。
+export const litterPool = createCollectiblePool();
+export const litter = litterPool.items;
 
-const SHOULDER_LAT = LANE_OFF + 8; // 車線中心からゴミ (= 寄せた収集車) までの横距離 ≒ 17
 const MAX_LITTER = 6;              // 視界付近に保つ最大数
 const SPAWN_CHANCE = 0.05;         // 1 フレームあたりのスポーン確率 (少なめに湧く)
 
@@ -26,55 +29,18 @@ export function straightDirs(t) {
   return null;
 }
 
-// dir 方向に走る車の左路肩のタイル内ローカル座標 (0..100)。along = 進行軸の位置 [0..1]。
-function litterLocal(dir, along) {
-  const hx = DX[dir], hy = DY[dir];   // 進行方向
-  const lx = hy, ly = -hx;            // その左 (= 路肩側)
-  const a = (along - 0.5) * 60;       // 進行軸に沿ったオフセット (±30 でタイル内に収める)
-  return { x: 50 + lx * SHOULDER_LAT + hx * a, y: 50 + ly * SHOULDER_LAT + hy * a };
-}
-
 // 直線タイル (tx,ty) の、通行方向 dir の左路肩にゴミを作る。
 export function makeLitter(tx, ty, dir, along = 0.5) {
-  const p = litterLocal(dir, along);
-  const g = { id: ++litterId, x: tx * TILE + p.x, y: ty * TILE + p.y, dir, hl: false };
-  litter.push(g);
-  return g;
+  const p = shoulderPoint(dir, along);
+  return litterPool.add({ x: tx * TILE + p.x, y: ty * TILE + p.y, dir });
 }
 
-export function removeLitter(g) {
-  const i = litter.indexOf(g);
-  if (i >= 0) litter.splice(i, 1);
-}
-
-// ハイライト (収集車が目的地にしているゴミ) は一度に 1 つ。render が「ゆっくり跳ねる」演出に使う。
-// g=null で全解除。タップでの誘導切替・回収/誘導解除のたびに呼ぶ (常に最新の目的地だけが光る)。
-export function setHighlight(g) {
-  for (const o of litter) o.hl = (o === g);
-}
-export function clearHighlight() {
-  for (const o of litter) o.hl = false;
-}
-
-// (x,y) に最も近いゴミを maxR 以内で返す (タップのヒットテスト用)。無ければ null。
-export function nearestLitter(x, y, maxR) {
-  let best = null, bestD = maxR * maxR;
-  for (const g of litter) {
-    const dd = (g.x - x) ** 2 + (g.y - y) ** 2;
-    if (dd <= bestD) { bestD = dd; best = g; }
-  }
-  return best;
-}
-
-// (x,y) 半径 r 内のゴミを回収 (除去)。回収した数を返す。
-export function collectAround(x, y, r) {
-  let n = 0;
-  for (let i = litter.length - 1; i >= 0; i--) {
-    const g = litter[i];
-    if ((g.x - x) ** 2 + (g.y - y) ** 2 <= r * r) { litter.splice(i, 1); n++; }
-  }
-  return n;
-}
+// 以下はプールへの委譲 (既存 API を維持)。ハイライトはゴミプール内で一度に 1 つ。
+export function removeLitter(g) { litterPool.remove(g); }
+export function setHighlight(g) { litterPool.setHighlight(g); }
+export function clearHighlight() { litterPool.clearHighlight(); }
+export function nearestLitter(x, y, maxR) { return litterPool.nearest(x, y, maxR); }
+export function collectAround(x, y, r) { return litterPool.collectAround(x, y, r); }
 
 // 視界外のゴミを除去し、視界内の直線路肩に稀に新しいゴミを湧かせる (車両の manageVehicles 相当)。
 export function manageLitter() {
@@ -96,7 +62,7 @@ export function manageLitter() {
     if (!dirs) continue;
     const dir = dirs[Math.floor(Math.random() * 2)];
     const along = 0.25 + Math.random() * 0.5;
-    const p = litterLocal(dir, along), wx = tx * TILE + p.x, wy = ty * TILE + p.y;
+    const p = shoulderPoint(dir, along), wx = tx * TILE + p.x, wy = ty * TILE + p.y;
     let tooClose = false;
     for (const o of litter) { if ((o.x - wx) ** 2 + (o.y - wy) ** 2 < 28 * 28) { tooClose = true; break; } }
     if (tooClose) continue;

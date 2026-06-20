@@ -6,11 +6,12 @@
 // 等の外部依存は持たない (どのシードでも通る)。実行: node src/test/esora-mod-test.mjs
 // =====================================================================
 import { tileInfo, clusterKey } from '../main/map.js';
-import { ENTRY, EXIT, lanePath, pathPoint } from '../main/roadpart.js';
+import { ENTRY, EXIT, lanePath, pathPoint, shoulderPoint } from '../main/roadpart.js';
 import * as camera from '../main/camera.js';
 import * as vehicles from '../main/vehicles.js';
 import * as scenario from '../main/scenario.js';
 import * as litter from '../main/litter.js';
+import * as mail from '../main/mail.js';
 import * as effects from '../main/effects.js';
 import * as render from '../main/render.js';
 import { DX, DY, OPP, TILE, ROAD_W, MIN_ZOOM, MAX_ZOOM } from '../main/config.js';
@@ -86,14 +87,16 @@ let t = 1000;
 
 // ゴミ収集イベントのスポーンは、その視界に直線路肩が無いと稀に失敗しうる。チェイス同様に
 // カメラを少し移して数回試す (テストの安定化のみ。本番の挙動は変えない)。
-const forceGarbage = () => {
-  let ev = scenario.forceSpawn(t, 'garbage');
+const forceCollector = (id) => {
+  let ev = scenario.forceSpawn(t, id);
   for (let tries = 0; tries < 8 && !ev; tries++) {
     camera.cam.x += 900; camera.cam.y += 600; t += 1000 / 60;
-    ev = scenario.forceSpawn(t, 'garbage');
+    ev = scenario.forceSpawn(t, id);
   }
   return ev;
 };
+const forceGarbage = () => forceCollector('garbage');
+const forceMail = () => forceCollector('mail');
 {
   camera.setViewport(1200, 800, 2);
   camera.placeCamera();
@@ -309,7 +312,15 @@ const forceGarbage = () => {
   if (s.garbage) fail('F: 回収後 (目的地無し) も収集車アイコンが残る'); // 回収後 → 非表示
   vehicles.removeVehicle(tr); s = render.chaseIconState();
   if (s.garbage) fail('F: 収集車デスポーンでアイコンが消えない');
-  console.log('検証F: アイコンは 昇格/スポーン表示・収集車は目的地のある間のみ・無力化/デスポーンで非表示 OK');
+  const pm = mk('post'); s = render.chaseIconState();
+  if (s.post) fail('F: 目的地の無い郵便車でアイコンが出る');               // targeting=false → 非表示
+  pm.targeting = true; s = render.chaseIconState();
+  if (!s.post) fail('F: 目的地へ向かう郵便車でアイコンが出ない');          // targeting=true → 表示
+  pm.targeting = false; s = render.chaseIconState();
+  if (s.post) fail('F: 回収後 (目的地無し) も郵便車アイコンが残る');       // 回収後 → 非表示
+  vehicles.removeVehicle(pm); s = render.chaseIconState();
+  if (s.post) fail('F: 郵便車デスポーンでアイコンが消えない');
+  console.log('検証F: アイコンは 昇格/スポーン表示・収集車/郵便車は目的地のある間のみ・無力化/デスポーンで非表示 OK');
 }
 
 // ---- 検証 G: 特別車の位置インジケータ (画面外=端にアイコン[車両座標に合わせる] / 画面内=ハイライト) ----
@@ -993,7 +1004,7 @@ process.stdout.write(s);\n`);
   const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
   camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
   // X1: 画面内で長時間停止 (stuckT 超過) してもグリッドロック撤去されない。画面外なら撤去される。
-  for (const role of ['police', 'flee', 'garbage']) {
+  for (const role of ['police', 'flee', 'garbage', 'post']) {
     clearAll();
     const v = vehicles.makeVehicle(0, 0, 0, 2, false);
     v.role = role; v.x = camera.cam.x; v.y = camera.cam.y; v.speed = 0; v.stuckT = 30; // 画面中心で停止し続け
@@ -1331,10 +1342,13 @@ process.stdout.write(s);\n`);
   if (!ev || !ev.truck) fail('AF: ゴミ収集車をスポーンできない');
   else {
     const truck = ev.truck;
-    scenario.setNextSpawnAt(t); // forceSpawn が止めた自動発生を、次フレームから許可
     let coexist = false, twoChase = false, twoGarb = false;
     for (let f = 0; f < 1200 && !coexist; f++) {
       t += 1000 / 60;
+      scenario.setNextSpawnAt(t);          // 毎フレーム自動発生を許可 (= ランダム gap を待たず安定化)。
+      // 自動発生は available (進行中でない種) からランダムに 1 種選ぶ。種は chase/garbage/mail の 3 つに
+      // なったので、garbage 進行中なら chase か mail が選ばれる。毎フレーム再武装すれば数フレームで
+      // chase も選ばれ garbage と共存する (本番の randGap を待たないだけで経路は同じ自動発生)。
       camera.cam.x = truck.x; camera.cam.y = truck.y; // 収集車を視界に保つ (デスポーン回避)
       vehicles.manageVehicles(t);          // チェイス昇格用の通常車を周囲に維持
       scenario.updateScenarios(1 / 60, t); // マネージャ: ゴミ収集が進行中でもチェイスを自動発生し得る
@@ -1353,6 +1367,367 @@ process.stdout.write(s);\n`);
     if (scenario.events.some(e => e.id === 'chase') && scenario.forceSpawn(t, 'chase') !== null) fail('AF: 逃走車が2つになった');
     clearAll(); ls.splice(0, ls.length); scenario.events.length = 0;
     console.log('検証AF: チェイスとゴミ収集は自動で共存可・同種は共存しない OK');
+  }
+}
+
+// ---- 検証 AH: 郵便ポスト設備 (バス停のようにまばらに直線へ配置・バス停と排他・進行方向つき) ----
+{
+  let straightAll = 0, posts = 0, both = 0, badDir = 0, badPlace = 0;
+  for (let ty = -100; ty < 100; ty++) for (let tx = -100; tx < 100; tx++) {
+    const t = tileInfo(tx, ty), c = t.conns;
+    const vert = c[0] && c[2] && !c[1] && !c[3];
+    const horiz = c[1] && c[3] && !c[0] && !c[2];
+    const isStraight = t.road && !t.junction && (vert || horiz);
+    if (isStraight) straightAll++;
+    if (t.post) {
+      posts++;
+      if (!isStraight) badPlace++;                                   // 直線以外には付かない
+      if (t.stop) both++;                                            // バス停と同居しない
+      const okDirs = vert ? [0, 2] : horiz ? [1, 3] : [];
+      if (!okDirs.includes(t.post.dir)) badDir++;                    // dir は直線の通行方向
+    }
+  }
+  const rate = posts / straightAll;
+  console.log(`検証AH: 直線 ${straightAll} 中 郵便ポスト ${posts} (${(rate * 100).toFixed(1)}%)`);
+  if (posts < 20) fail('AH: 郵便ポストが少なすぎる (生成されていない?)');
+  if (rate < 0.02 || rate > 0.12) fail(`AH: 郵便ポスト率がまばらの想定外 (${(rate * 100).toFixed(1)}%)`);
+  if (badPlace) fail(`AH: 郵便ポストが直線以外に付いた (${badPlace})`);
+  if (both) fail(`AH: 郵便ポストがバス停と同居した (${both})`);
+  if (badDir) fail(`AH: 郵便ポストの dir が直線方向でない (${badDir})`);
+  console.log('検証AH: 郵便ポストは直線にまばら・バス停と排他・進行方向つき OK');
+}
+
+// ---- 検証 AI: 郵便物プール (生成/最寄り/回収/ハイライト・ポスト上にのみ湧く) ----
+{
+  const ms = mail.mail, mp = mail.mailPool;
+  const clear = () => ms.splice(0, ms.length);
+  // ポスト点 (= 郵便物が乗るべき座標) を返すヘルパ
+  const postPointOf = (tx, ty) => { const ti = tileInfo(tx, ty); if (!ti.post) return null;
+    const p = shoulderPoint(ti.post.dir, 0.5); return { x: tx * TILE + p.x, y: ty * TILE + p.y }; };
+  // ポストのある直線タイルを探す
+  let ptx, pty, pdir;
+  for (let ty = -60; ty <= 60 && ptx === undefined; ty++) for (let tx = -60; tx <= 60; tx++) {
+    const ti = tileInfo(tx, ty); if (ti.post) { ptx = tx; pty = ty; pdir = ti.post.dir; break; }
+  }
+  if (ptx === undefined) fail('AI: 郵便ポストのあるタイルが見つからない');
+  else {
+    // AI1: makeMail はポスト点に置く + プール基本操作 (最寄り/ハイライト/回収)
+    clear();
+    const g = mail.makeMail(ptx, pty, pdir);
+    const pp = postPointOf(ptx, pty);
+    if (ms.length !== 1) fail('AI1: 郵便物が追加されない');
+    if (Math.abs(g.x - pp.x) > 1e-6 || Math.abs(g.y - pp.y) > 1e-6) fail('AI1: 郵便物がポスト点に乗っていない');
+    if (mp.nearest(g.x, g.y, 20) !== g) fail('AI1: nearest が近傍の郵便物を返さない');
+    if (mp.nearest(g.x + 999, g.y, 20) !== null) fail('AI1: nearest が遠方で null を返さない');
+    mp.setHighlight(g); if (!g.hl) fail('AI1: setHighlight でハイライトされない');
+    if (mp.collectAround(g.x, g.y, 18) !== 1 || ms.length !== 0) fail('AI1: collectAround で回収されない');
+
+    // AI2: manageMail は郵便物をポスト上にだけ湧かせる (湧いた各郵便物が、その所在タイルのポスト点と一致)
+    clear();
+    camera.setViewport(1200, 800, 2);
+    camera.cam.x = ptx * TILE + 50; camera.cam.y = pty * TILE + 50; camera.cam.zoom = 1.2;
+    let maxSpawned = 0, offPost = 0;
+    for (let f = 0; f < 6000; f++) {
+      mail.manageMail();
+      for (const o of ms) {
+        const pt = postPointOf(Math.floor(o.x / TILE), Math.floor(o.y / TILE));
+        if (!pt || Math.abs(o.x - pt.x) > 1 || Math.abs(o.y - pt.y) > 1) offPost++; // ポスト点でない
+      }
+      maxSpawned = Math.max(maxSpawned, ms.length);
+    }
+    console.log(`検証AI: manageMail で最大 ${maxSpawned} 個湧き / ポスト外 ${offPost}`);
+    if (maxSpawned < 1) fail('AI2: manageMail で郵便物が湧かない');
+    if (offPost) fail(`AI2: 郵便物がポスト上以外に湧いた (${offPost})`);
+    clear();
+    console.log('検証AI: 郵便物プール 生成/最寄り/回収/ハイライト・ポスト上にのみ湧く OK');
+  }
+}
+
+// ---- 検証 AJ: 郵便車はタップした (ハイライトされた) 郵便物へ向かい、寄せて約1秒後に回収し、離脱で車線へ戻る ----
+{
+  const vs = vehicles.vehicles, ms = mail.mail, ls = litter.litter;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  ms.splice(0, ms.length); ls.splice(0, ls.length); clearAll(); scenario.events.length = 0;
+  let stx, sty;
+  for (let ty = -30; ty <= 30 && stx === undefined; ty++) for (let tx = -30; tx <= 30; tx++) {
+    const ti = tileInfo(tx, ty);
+    if (ti.road && !ti.junction && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; break; }
+  }
+  camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
+  const ev = forceMail();
+  if (!ev || !ev.truck) fail('AJ: 郵便車をスポーンできない');
+  else if (stx === undefined) fail('AJ: 直線タイルが無い');
+  else {
+    const truck = ev.truck, lp = lanePath(0, 2);
+    if (truck.role !== 'post' || truck.color !== '#d2362f') fail('AJ: 郵便車のロール/色が赤の郵便車でない');
+    truck.tx = stx; truck.ty = sty; truck.din = 0; truck.dout = 2; truck.path = lp; truck.s = lp.len * 0.2; truck.steer = null;
+    truck.speed = truck.vmax || 20; vehicles.repositionVehicle(truck);
+    const g = mail.makeMail(stx, sty, 2);          // 南進の左路肩 (ポスト点)・前方
+    camera.cam.x = truck.x; camera.cam.y = truck.y;
+    scenario.tapWorld(g.x, g.y);                    // タップで目的地に (ハイライト)
+    if (ev.dest !== g) fail('AJ: タップした郵便物が目的地に設定されない');
+    const before = ms.length;
+    let pulled = false, collected = false, collectedWhileNotAside = false, asideFrame = -1, collectFrame = -1;
+    for (let f = 0; f < 420 && !(pulled && collected); f++) {
+      camera.cam.x = truck.x; camera.cam.y = truck.y;
+      const asideAt = truck.aside, lenAt = ms.length;
+      ev.update(1 / 60, t); vehicles.updateAll(1 / 60); t += 1000 / 60;
+      if (truck.latTarget > 0) pulled = true;
+      if (ms.length < before) collected = true;
+      if (ms.length < lenAt && !asideAt) collectedWhileNotAside = true;
+      if (asideFrame < 0 && truck.aside) asideFrame = f;
+      if (collectFrame < 0 && ms.indexOf(g) < 0) collectFrame = f;
+    }
+    if (!pulled) fail('AJ: 目的地の郵便物に近づいても路肩へ寄せない');
+    if (!collected) fail('AJ: 寄せても目的地の郵便物を回収しない');
+    if (collectedWhileNotAside) fail('AJ: 路肩へ寄せていない (aside でない) のに回収した');
+    if (asideFrame >= 0 && collectFrame >= 0 && !((collectFrame - asideFrame) / 60 > 0.6))
+      fail(`AJ: 寄せてすぐ回収した (遅延 ${((collectFrame - asideFrame) / 60).toFixed(2)}s)`);
+    let returned = false, resumed = 0;
+    for (let f = 0; f < 300; f++) {
+      camera.cam.x = truck.x; camera.cam.y = truck.y;
+      ev.update(1 / 60, t); vehicles.updateAll(1 / 60); t += 1000 / 60;
+      if (truck.latTarget === 0) returned = true;
+      resumed += truck.speed / 60;
+    }
+    if (!returned) fail('AJ: 郵便物が無くなっても車線へ戻らない');
+    if (!(resumed > 20)) fail(`AJ: 回収後に走行を再開しない (前進 ${resumed.toFixed(1)})`);
+    clearAll(); ms.splice(0, ms.length); scenario.events.length = 0;
+    console.log('検証AJ: 郵便車はタップ目的地へ向かい・寄せて約1秒後に回収・離脱で車線へ戻る OK');
+  }
+}
+
+// ---- 検証 AK: 郵便車は操作なし (ハイライト無し) では郵便物を探索/回収しない ----
+{
+  const vs = vehicles.vehicles, ms = mail.mail, ls = litter.litter;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  ms.splice(0, ms.length); ls.splice(0, ls.length); clearAll(); scenario.events.length = 0;
+  let stx, sty;
+  for (let ty = -30; ty <= 30 && stx === undefined; ty++) for (let tx = -30; tx <= 30; tx++) {
+    const ti = tileInfo(tx, ty);
+    if (ti.road && !ti.junction && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; break; }
+  }
+  camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
+  const ev = forceMail();
+  if (ev && ev.truck && stx !== undefined) {
+    const truck = ev.truck, lp = lanePath(0, 2);
+    truck.tx = stx; truck.ty = sty; truck.din = 0; truck.dout = 2; truck.path = lp; truck.s = lp.len * 0.2; truck.steer = null;
+    truck.speed = truck.vmax || 20; vehicles.repositionVehicle(truck);
+    mail.makeMail(stx, sty, 2); // 前方・近接 (だがタップしない)
+    const before = ms.length;
+    let steered = false, pulled = false, collected = false;
+    for (let f = 0; f < 240; f++) {
+      camera.cam.x = truck.x; camera.cam.y = truck.y;
+      ev.update(1 / 60, t); vehicles.updateAll(1 / 60); t += 1000 / 60;
+      if (truck.steer !== null) steered = true;
+      if (truck.latTarget > 0) pulled = true;
+      if (ms.length < before) collected = true;
+    }
+    if (steered) fail('AK: 操作なしに目的地誘導 (探索) した');
+    if (pulled) fail('AK: 操作なしに路肩へ寄せた');
+    if (collected) fail('AK: 操作なしに前方の郵便物を回収した');
+    clearAll(); ms.splice(0, ms.length); scenario.events.length = 0;
+    console.log('検証AK: 郵便車は操作なしでは郵便物を探索/回収しない OK');
+  } else fail('AK: 郵便車をスポーンできない');
+}
+
+// ---- 検証 AL: 郵便物のタップで郵便車が向かう / 不在ならスポーン / 同時 1 台 ----
+{
+  const vs = vehicles.vehicles, ms = mail.mail, ls = litter.litter;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  ms.splice(0, ms.length); ls.splice(0, ls.length); clearAll(); scenario.events.length = 0;
+  let stx, sty;
+  for (let ty = -30; ty <= 30 && stx === undefined; ty++) for (let tx = -30; tx <= 30; tx++) {
+    const ti = tileInfo(tx, ty);
+    if (ti.road && !ti.junction && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; break; }
+  }
+  camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
+  camera.cam.x = stx * TILE + 50; camera.cam.y = sty * TILE + 50;
+  const g = mail.makeMail(stx, sty, 2);
+  const consumed = scenario.tapWorld(g.x, g.y);
+  const mev = scenario.events.filter((e) => e.id === 'mail');
+  if (!consumed) fail('AL: 郵便物のタップが消費されない');
+  if (mev.length !== 1) fail(`AL: タップで郵便イベントが 1 つにならない (${mev.length})`);
+  else {
+    const ev = mev[0];
+    if (!ev.truck || ev.truck.role !== 'post') fail('AL: スポーンした車が郵便車 (role=post) でない');
+    if (ev.dest !== g) fail('AL: タップした郵便物が目的地に設定されない');
+    if (typeof ev.truck.steer !== 'function') fail('AL: 郵便車が郵便物へ向かう操舵を持たない');
+    const id0 = ev.truck.id;
+    scenario.tapWorld(g.x, g.y);                  // 再タップ
+    const mev2 = scenario.events.filter((e) => e.id === 'mail');
+    if (mev2.length !== 1) fail(`AL: 再タップで郵便車が増えた (${mev2.length})`);
+    if (mev2[0].truck.id !== id0) fail('AL: 再タップで別の郵便車になった');
+  }
+  clearAll(); ms.splice(0, ms.length); scenario.events.length = 0;
+  console.log('検証AL: 郵便物タップで誘導 / 不在ならスポーン / 同時 1 台 OK');
+}
+
+// ---- 検証 AM: 対向車線の郵便物でも、走行車線の路肩へ寄せて (aside) 回収する ----
+{
+  const vs = vehicles.vehicles, ms = mail.mail, ls = litter.litter;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  ms.splice(0, ms.length); ls.splice(0, ls.length); clearAll(); scenario.events.length = 0;
+  let stx, sty;
+  for (let ty = -30; ty <= 30 && stx === undefined; ty++) for (let tx = -30; tx <= 30; tx++) {
+    const ti = tileInfo(tx, ty);
+    if (ti.road && !ti.junction && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; break; }
+  }
+  camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
+  const ev = forceMail();
+  if (ev && ev.truck && stx !== undefined) {
+    const truck = ev.truck, lp = lanePath(0, 2);
+    truck.tx = stx; truck.ty = sty; truck.din = 0; truck.dout = 2; truck.path = lp; truck.s = lp.len * 0.2; truck.steer = null;
+    truck.speed = truck.vmax || 20; vehicles.repositionVehicle(truck);
+    const g = mail.makeMail(stx, sty, 0); // 北向きの左路肩 = 南進の郵便車から見て対向 (右) 側
+    scenario.tapWorld(g.x, g.y);
+    if (ev.dest !== g) fail('AM: タップした郵便物が目的地に設定されない');
+    let collected = false, asideWhenCollected = null;
+    for (let f = 0; f < 420 && !collected; f++) {
+      camera.cam.x = truck.x; camera.cam.y = truck.y;
+      const asideAt = truck.aside, had = ms.indexOf(g) >= 0;
+      ev.update(1 / 60, t); vehicles.updateAll(1 / 60); t += 1000 / 60;
+      if (had && ms.indexOf(g) < 0) { collected = true; asideWhenCollected = asideAt; }
+    }
+    if (!collected) fail('AM: 対向側の郵便物が回収されない');
+    if (asideWhenCollected === false) fail('AM: 路肩へ寄せずに対向側の郵便物を回収した');
+    clearAll(); ms.splice(0, ms.length); scenario.events.length = 0;
+    console.log('検証AM: 対向車線の郵便物も走行車線の路肩へ寄せて回収 OK');
+  } else fail('AM: 郵便車をスポーンできない');
+}
+
+// ---- 検証 AN: タップは最寄りの収集対象に振り分く (ゴミ→収集車 / 郵便物→郵便車)・ハイライトは独立 ----
+{
+  const vs = vehicles.vehicles, ms = mail.mail, ls = litter.litter;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  ms.splice(0, ms.length); ls.splice(0, ls.length); clearAll(); scenario.events.length = 0;
+  let stx, sty;
+  for (let ty = -30; ty <= 30 && stx === undefined; ty++) for (let tx = -30; tx <= 30; tx++) {
+    const ti = tileInfo(tx, ty);
+    if (ti.road && !ti.junction && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; break; }
+  }
+  if (stx === undefined) fail('AN: 直線タイルが見つからない');
+  else {
+    camera.placeCamera(); camera.zoomAt(600, 400, 1.2);
+    camera.cam.x = stx * TILE + 50; camera.cam.y = sty * TILE + 50;
+    const litterG = litter.makeLitter(stx, sty, 2, 0.3);  // ゴミ
+    const mailG = mail.makeMail(stx, sty + 5, 2);          // 郵便物 (遠く離す = タップ点が混ざらない)
+    // ゴミをタップ → 収集車イベントが立ち、ゴミがハイライト。郵便物には影響しない。
+    if (!scenario.tapWorld(litterG.x, litterG.y)) fail('AN: ゴミのタップが消費されない');
+    if (!litterG.hl) fail('AN: ゴミタップでゴミがハイライトされない');
+    if (mailG.hl) fail('AN: ゴミタップで郵便物までハイライトされた (独立でない)');
+    const gEv = scenario.events.find((e) => e.id === 'garbage');
+    if (!gEv || gEv.dest !== litterG) fail('AN: ゴミタップが収集車 (garbage) に振り分けられない');
+    if (scenario.events.some((e) => e.id === 'mail')) fail('AN: ゴミタップで郵便車が立った (誤振り分け)');
+    // 郵便物をタップ → 郵便車イベントが立ち、郵便物がハイライト。ゴミのハイライトは保たれる (独立)。
+    if (!scenario.tapWorld(mailG.x, mailG.y)) fail('AN: 郵便物のタップが消費されない');
+    if (!mailG.hl) fail('AN: 郵便物タップで郵便物がハイライトされない');
+    if (!litterG.hl) fail('AN: 郵便物タップでゴミのハイライトが消えた (独立でない)');
+    const mEv = scenario.events.find((e) => e.id === 'mail');
+    if (!mEv || mEv.dest !== mailG) fail('AN: 郵便物タップが郵便車 (mail) に振り分けられない');
+    if (gEv.dest !== litterG) fail('AN: 郵便物タップで収集車の目的地が変わった (独立でない)');
+    clearAll(); ms.splice(0, ms.length); ls.splice(0, ls.length); scenario.events.length = 0;
+    console.log('検証AN: タップは最寄りの収集対象へ振り分く・ハイライトは種別ごと独立 OK');
+  }
+}
+
+// ---- 検証 AO: 郵便物の描画 (ポストへの吹き出し / ハイライトでポストを囲むリング) + ポスト描画が走る ----
+{
+  const calls = [];
+  const recNames = new Set(['setTransform', 'scale', 'arc', 'roundRect', 'rect', 'fillRect', 'beginPath', 'fill', 'save', 'restore', 'translate', 'rotate', 'moveTo', 'lineTo', 'closePath', 'clearRect', 'stroke', 'strokeRect', 'setLineDash', 'ellipse']);
+  const recCtx = new Proxy({}, { get: (_t, p) => recNames.has(p) ? (...a) => { calls.push([p, a]); } : undefined, set: () => true });
+  render.initRender({ getContext: () => recCtx });
+  camera.setViewport(1200, 800, 2);
+  const ms = mail.mail; ms.splice(0, ms.length);
+  let ptx, pty, pdir;                                  // ポストのあるタイル (= ポスト描画も走る)
+  for (let ty = -60; ty <= 60 && ptx === undefined; ty++) for (let tx = -60; tx <= 60; tx++) {
+    const ti = tileInfo(tx, ty); if (ti.post) { ptx = tx; pty = ty; pdir = ti.post.dir; break; }
+  }
+  if (ptx === undefined) fail('AO: 郵便ポストのあるタイルが見つからない');
+  else {
+    camera.placeCamera(); camera.zoomAt(600, 400, 1.2); // detailed (z>0.6) → ポストも描画
+    const g = mail.makeMail(ptx, pty, pdir);
+    camera.cam.x = g.x; camera.cam.y = g.y;             // ポスト/郵便物を視界中心へ
+    // AO1: 郵便物があると描画呼び出しが増える (吹き出し)。ポストは両シーン共通なので差分は郵便物のみ。
+    ms.splice(0, ms.length);
+    calls.length = 0; render.drawScene();
+    const base = calls.length;
+    ms.push(g);
+    calls.length = 0; render.drawScene();
+    if (!(calls.length > base)) fail(`AO1: 郵便物の吹き出しが描画されない (base=${base} with=${calls.length})`);
+    // AO2: ハイライトでリング (arc) が増える
+    mail.mailPool.clearHighlight();
+    calls.length = 0; render.drawScene();
+    const arcsOff = calls.filter((c) => c[0] === 'arc').length;
+    mail.mailPool.setHighlight(g);
+    calls.length = 0; render.drawScene();
+    const arcsOn = calls.filter((c) => c[0] === 'arc').length;
+    if (!(arcsOn > arcsOff)) fail(`AO2: 郵便物ハイライトのリングが描かれない (off=${arcsOff} on=${arcsOn})`);
+    ms.splice(0, ms.length);
+    console.log('検証AO: 郵便物の吹き出し描画 / ハイライトリング / ポスト描画 OK');
+  }
+}
+
+// ---- 検証 AP: 郵便車の位置インジケータ (目的地ある間のみ・画面内=ハイライト/画面外=赤いミニカーアイコン) ----
+{
+  const recNames = new Set(['setTransform', 'scale', 'arc', 'roundRect', 'rect', 'fillRect', 'strokeRect', 'beginPath', 'fill', 'stroke', 'save', 'restore', 'translate', 'rotate', 'moveTo', 'lineTo', 'setLineDash', 'ellipse', 'closePath', 'clearRect']);
+  const calls = [];
+  const recCtx = new Proxy({}, { get: (_t, p) => recNames.has(p) ? (...a) => { calls.push([p, a]); } : undefined, set: () => true });
+  camera.setViewport(1200, 800, 2); camera.placeCamera(); camera.zoomAt(600, 400, 1);
+  const W = 1200, H = 800, z = camera.cam.zoom, cx = camera.cam.x, cy = camera.cam.y;
+  const vs = vehicles.vehicles;
+  const worldAt = (sx, sy) => ({ x: cx + (sx - W / 2) / z, y: cy + (sy - H / 2) / z });
+  // AP1: targeting の郵便車だけがインジケータ対象 (画面内 → onScreen / kind=post)
+  vs.splice(0, vs.length);
+  const v = vehicles.makeVehicle(0, 0, 0, 2, false); v.role = 'post'; v.targeting = false; v.x = cx; v.y = cy; vs.push(v);
+  if (render.targetIndicators().length !== 0) fail('AP1: 目的地の無い郵便車にインジケータが出た');
+  v.targeting = true;
+  const ind = render.targetIndicators()[0];
+  if (!ind || ind.kind !== 'post' || !ind.onScreen) fail('AP1: 画面内の郵便車インジケータが onScreen/post でない');
+  // AP2: 画面外 → 画面端に白丸アイコン (R=21) が HUD 座標で描かれる
+  render.initRender({ getContext: () => recCtx });
+  vs.splice(0, vs.length);
+  const v2 = vehicles.makeVehicle(0, 0, 0, 2, false); v2.role = 'post'; v2.targeting = true;
+  const w = worldAt(-200, H / 2); v2.x = w.x; v2.y = w.y; vs.push(v2);
+  calls.length = 0; render.drawScene();
+  const iconArcs = calls.filter((c) => c[0] === 'arc' && Math.abs(c[1][2] - 21) < 0.01);
+  if (!iconArcs.length) fail('AP2: 画面外の郵便車に端アイコン (R=21) が描かれない');
+  else if (!(iconArcs[0][1][0] < 60)) fail(`AP2: 郵便車アイコンが左端に置かれていない (x=${iconArcs[0][1][0].toFixed(0)})`);
+  vs.splice(0, vs.length);
+  console.log('検証AP: 郵便車の位置インジケータ (目的地のある間・画面内ハイライト/画面外アイコン) OK');
+}
+
+// ---- 検証 AQ: 郵便物のタップはポスト本体でも吹き出しアイコン (ポストの上) でも受け付ける ----
+{
+  const vs = vehicles.vehicles, ms = mail.mail, ls = litter.litter;
+  const clearAll = () => { while (vs.length) vehicles.removeVehicle(vs[0]); };
+  ms.splice(0, ms.length); ls.splice(0, ls.length); clearAll(); scenario.events.length = 0;
+  let stx, sty;
+  for (let ty = -30; ty <= 30 && stx === undefined; ty++) for (let tx = -30; tx <= 30; tx++) {
+    const ti = tileInfo(tx, ty);
+    if (ti.road && !ti.junction && ti.conns[0] && ti.conns[2] && !ti.conns[1] && !ti.conns[3]) { stx = tx; sty = ty; break; }
+  }
+  if (stx === undefined) fail('AQ: 直線タイルが見つからない');
+  else {
+    camera.placeCamera(); camera.zoomAt(600, 400, 1.0); // この拡大率で吹き出しは本体のタップ半径より上に出る
+    camera.cam.x = stx * TILE + 50; camera.cam.y = sty * TILE + 50;
+    const g = mail.makeMail(stx, sty, 2);
+    const sc = camera.drawScale();
+    const iconY = g.y - mail.BUBBLE_DY * sc;             // 吹き出しアイコンの世界 y
+    const offset = g.y - iconY;
+    // 前提: この拡大率では吹き出しが本体のタップ半径(40)を超えて上にある = オフセット判定が必要
+    if (!(offset > 40)) fail(`AQ: 前提 - 吹き出しオフセットが小さすぎる (${offset.toFixed(1)})`);
+    if (mail.mailPool.nearest(g.x, iconY, 40) !== null) fail('AQ: 前提 - 本体座標だけの判定で吹き出し位置が拾えてしまう');
+    // AQ1: ポスト本体でタップ → 受け付け・目的地に
+    if (scenario.tapWorld(g.x, g.y) !== true) fail('AQ1: ポスト本体のタップが受け付けられない');
+    let ev = scenario.events.find((e) => e.id === 'mail');
+    if (!ev || ev.dest !== g) fail('AQ1: ポスト本体タップで目的地にならない');
+    // AQ2: 吹き出しアイコン位置でタップ → 受け付け・同じ郵便物が目的地に
+    if (scenario.tapWorld(g.x, iconY) !== true) fail('AQ2: 吹き出しアイコンのタップが受け付けられない');
+    ev = scenario.events.find((e) => e.id === 'mail');
+    if (!ev || ev.dest !== g) fail('AQ2: 吹き出しアイコンのタップで目的地にならない');
+    clearAll(); ms.splice(0, ms.length); scenario.events.length = 0;
+    console.log('検証AQ: 郵便物はポスト本体でも吹き出しアイコンでもタップできる OK');
   }
 }
 

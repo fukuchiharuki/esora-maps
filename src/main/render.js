@@ -8,13 +8,15 @@
 //    カーブ・T字・十字の右左折パスを舗装上に収める。
 //  - 車両 (画面内のみ)
 // =====================================================================
-import { TILE, ROAD_W, SIDE_W, LANE_OFF, DX, DY, MIN_ZOOM, MAX_ZOOM } from './config.js';
+import { TILE, ROAD_W, SIDE_W, LANE_OFF, DX, DY } from './config.js';
 import { hash, rnd01 } from './rng.js';
+import { shoulderPoint } from './roadpart.js';
 import { tileInfo } from './map.js';
 import { vehicles } from './vehicles.js';
 import { litter } from './litter.js';
+import { mail, BUBBLE_DY } from './mail.js';
 import { effects, RIPPLE_DUR } from './effects.js';
-import { cam, view, rect, setViewport } from './camera.js';
+import { cam, view, rect, setViewport, drawScale } from './camera.js';
 
 let canvas = null, ctx = null;
 
@@ -159,23 +161,32 @@ function drawRoadDetail(tile) {
     ctx.fillStyle = '#fff';
     ctx.beginPath(); ctx.arc(sx, sy - 8, 1.6, 0, Math.PI * 2); ctx.fill();
   }
-}
-
-// 引き (低ズーム) ほど車両を大きく描く描画専用スケール。最寄り (MAX_ZOOM) = 実寸 (現状どおり)、
-// 最引き (MIN_ZOOM) = 片車線 (ROAD_W/2=18) を超える程度。len/wid は変えないので当たり判定には影響しない。
-const VEHICLE_DRAW_SCALE_MAX = 3.0; // 乗用車 幅7.5 × 3.0 ≒ 22.5 ≒ 片車線 18 をしっかり超える
-function vehicleDrawScale() {
-  const t = (MAX_ZOOM - cam.zoom) / (MAX_ZOOM - MIN_ZOOM); // 0 = 最寄り … 1 = 最引き
-  const c = t < 0 ? 0 : t > 1 ? 1 : t;
-  return 1 + c * (VEHICLE_DRAW_SCALE_MAX - 1);
+  // 郵便ポスト: 路肩点 (shoulderPoint = 郵便物が乗る座標と同一) に描く。日本スタイル =
+  // 赤い四角の箱を赤い棒 (支柱) が支える形。棒は短く・四角は縦長。棒の下端 (= 接地点) が
+  // 路肩点に来るよう全体を上へ積む (= 道路上に立っているように見えない)。
+  if (tile.post) {
+    const p = shoulderPoint(tile.post.dir, 0.5);
+    const cx = ox + p.x, cy = oy + p.y; // 棒の下端 (接地点) がこの位置
+    ctx.fillStyle = '#b02a24';                                // 支柱 (短い棒。下端 = cy)
+    ctx.fillRect(cx - 1.6, cy - 4, 3.2, 4);
+    ctx.fillStyle = '#d2362f';                                // 箱本体 (赤い四角・縦長)
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(cx - 4.5, cy - 16, 9, 12, 2); else ctx.rect(cx - 4.5, cy - 16, 9, 12);
+    ctx.fill();
+    ctx.fillStyle = '#b02a24';                                // 天面の縁 (帽子)
+    ctx.fillRect(cx - 4.5, cy - 16, 9, 2);
+    ctx.fillStyle = 'rgba(20,20,20,0.7)';                     // 投入口 (横長スリット)
+    ctx.fillRect(cx - 3, cy - 12, 6, 1.6);
+  }
 }
 
 // 路肩のゴミ袋 (車両以外のオブジェクト)。車両と同じく引きで大きく描く (タップしやすく)。
+// 描画拡大率は camera.drawScale (描画と当たり判定で同じ値を使う単一ソース)。
 // ハイライト中 (収集車の目的地) はゆっくり「ピョーンピョーン」と跳ね、強調リングを添える。
 function drawLitter(g) {
   ctx.save();
   ctx.translate(g.x, g.y);
-  const ds = vehicleDrawScale();
+  const ds = drawScale();
   ctx.scale(ds, ds);
   ctx.fillStyle = 'rgba(0,0,0,0.18)';                       // 影 (地面に残り跳ねない)
   ctx.beginPath(); ctx.ellipse(0.6, 1.6, 4.4, 2.4, 0, 0, Math.PI * 2); ctx.fill();
@@ -197,6 +208,34 @@ function drawLitter(g) {
   ctx.restore();
 }
 
+// 郵便物。座標 (g.x,g.y) はポスト上だが、見た目はポストに対し「吹き出し」として上に出す。
+// ハイライト中 (郵便車の目的地) はポスト点を囲む赤いリングを添え、吹き出しがゆっくり跳ねる。
+function drawMail(g) {
+  ctx.save();
+  ctx.translate(g.x, g.y);                                  // = ポスト点
+  const ds = drawScale();
+  ctx.scale(ds, ds);
+  let bounce = 0;
+  if (g.hl) {                                               // ハイライト: ポストを囲むリング + 吹き出しが跳ねる
+    const ph = (performance.now() % 900) / 900;             // 0..1 のループ (ゆっくり)
+    bounce = -Math.abs(Math.sin(ph * Math.PI)) * 4;
+    ctx.strokeStyle = 'rgba(210,54,47,0.9)';                // 赤系のリング (郵便)
+    ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI * 2); ctx.stroke();
+  }
+  const by = -BUBBLE_DY + bounce;                           // 吹き出しの中心 (背の高い箱の上に浮かせる)
+  ctx.fillStyle = 'rgba(255,255,255,0.96)';                 // 吹き出し本体 (白)
+  ctx.beginPath(); ctx.moveTo(-2, by + 4.5); ctx.lineTo(2, by + 4.5); ctx.lineTo(0, by + 8.5); ctx.closePath(); ctx.fill(); // 尾
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(-6, by - 5, 12, 9, 2.5); else ctx.rect(-6, by - 5, 12, 9);
+  ctx.fill();
+  ctx.strokeStyle = '#d2362f';                              // 封筒 (赤枠 + フラップ)
+  ctx.lineWidth = 0.8;
+  ctx.strokeRect(-4.5, by - 3.4, 9, 6);
+  ctx.beginPath(); ctx.moveTo(-4.5, by - 3.4); ctx.lineTo(0, by + 0.6); ctx.lineTo(4.5, by - 3.4); ctx.stroke();
+  ctx.restore();
+}
+
 // タップ波紋 (共通の視覚エフェクト)。ワールド座標で広がりながら薄れる白い輪。線幅は画面上で一定。
 function drawEffects() {
   if (!effects.length) return;
@@ -214,7 +253,7 @@ function drawVehicle(v) {
   const flash = (performance.now() % 440) < 220; // 赤青灯の点滅位相
   ctx.save();
   ctx.translate(v.x, v.y);
-  const ds = vehicleDrawScale();
+  const ds = drawScale();
   ctx.scale(ds, ds); // 引きほど大きく (描画専用 / 当たり判定は len・wid のまま)
   // パトカーのサイレン光 (無回転の円なので rotate 前に描く)
   if (v.role === 'police') {
@@ -243,6 +282,24 @@ function drawVehicle(v) {
     ctx.fillRect(L / 2 - cab - 1, -W / 2 + 0.6, 1.4, W - 1.2);
     ctx.fillStyle = 'rgba(40,55,75,0.78)'; // 頭の窓 (前)
     ctx.fillRect(L / 2 - cab * 0.62, -W / 2 + 1.4, cab * 0.4, W - 2.8);
+    ctx.restore();
+    return;
+  }
+  // 郵便車: 赤いバン (頭も赤)。前方=+x の運転台はやや濃い赤で区別し、窓と白帯で前方/郵便を示す。
+  if (v.role === 'post') {
+    const cab = L * 0.32; // 運転台の長さ
+    ctx.fillStyle = v.color; // 赤い荷台 (車体全体)
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-L / 2, -W / 2, L, W, 2.4); else ctx.rect(-L / 2, -W / 2, L, W);
+    ctx.fill();
+    ctx.fillStyle = '#b02a24'; // 運転台 (頭も赤。やや濃い赤で頭を区別)
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(L / 2 - cab, -W / 2, cab, W, 2.4); else ctx.rect(L / 2 - cab, -W / 2, cab, W);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(40,55,75,0.78)'; // 運転台の窓 (前)
+    ctx.fillRect(L / 2 - cab * 0.62, -W / 2 + 1.4, cab * 0.4, W - 2.8);
+    ctx.fillStyle = '#fff'; // 荷台側面の白い帯 (郵便を示す)
+    ctx.fillRect(-L / 2 + 1.5, -1, L - cab - 3, 2);
     ctx.restore();
     return;
   }
@@ -287,10 +344,11 @@ const ICON_R = 21;          // アイコンの白丸半径
 const ICON_MARGIN = ICON_R + 8; // 画面端からの内側マージン (アイコン全体が見えるように)
 const HIGHLIGHT_R = 15;     // 車両ハイライトの半径 (全車種共通の大きさ。車体長 len には依存しない)
 
-// その車両が位置インジケータの対象 (役割) か。収集車は目的地へ向かう間だけ (targeting)。
+// その車両が位置インジケータの対象 (役割) か。収集車/郵便車は目的地へ向かう間だけ (targeting)。
 function indicatorKind(v) {
   if (v.parked) return null;                         // 無力化済みは知らせない
   if (v.role === 'garbage') return v.targeting ? 'garbage' : null; // 目的地へ向かう間だけ
+  if (v.role === 'post') return v.targeting ? 'post' : null;       // 同上 (郵便車)
   if (v.role === 'flee') return 'flee';
   if (v.role === 'police') return 'police';
   return null;
@@ -312,16 +370,17 @@ export function targetIndicators() {
   return out;
 }
 
-// 既存テスト互換: 各役割で「位置インジケータの対象車両が居るか」(収集車は targeting のときだけ)。
+// 既存テスト互換: 各役割で「位置インジケータの対象車両が居るか」(収集車/郵便車は targeting のときだけ)。
 export function chaseIconState() {
-  let flee = false, police = false, garbage = false;
+  let flee = false, police = false, garbage = false, post = false;
   for (const v of vehicles) {
     const kind = indicatorKind(v);
     if (kind === 'flee') flee = true;
     else if (kind === 'police') police = true;
     else if (kind === 'garbage') garbage = true;
+    else if (kind === 'post') post = true;
   }
-  return { flee, police, garbage };
+  return { flee, police, garbage, post };
 }
 
 // 白丸の中に上向きのミニカーを描く (原点中心)
@@ -380,6 +439,7 @@ function drawIcon(cx, cy, R, kind) {
   ctx.save();
   ctx.translate(cx, cy);
   if (kind === 'garbage') drawMiniTruck();
+  else if (kind === 'post') drawMiniCar('#d2362f', false); // 郵便車 = 赤いミニカー
   else drawMiniCar(kind === 'flee' ? '#1b1d22' : '#eaf0f7', kind === 'police');
   ctx.restore();
 }
@@ -389,7 +449,7 @@ function drawIcon(cx, cy, R, kind) {
 function drawTargetHighlight(v) {
   ctx.save();
   ctx.translate(v.x, v.y);
-  const ds = vehicleDrawScale();
+  const ds = drawScale();
   ctx.scale(ds, ds);
   ctx.fillStyle = 'rgba(255,255,255,0.30)';
   ctx.beginPath();
@@ -435,6 +495,9 @@ export function drawScene() {
   const wy0 = cam.y - view.cssH / 2 / z - m, wy1 = cam.y + view.cssH / 2 / z + m;
   for (const g of litter) {
     if (g.x >= wx0 && g.x <= wx1 && g.y >= wy0 && g.y <= wy1) drawLitter(g);
+  }
+  for (const g of mail) {
+    if (g.x >= wx0 && g.x <= wx1 && g.y >= wy0 && g.y <= wy1) drawMail(g);
   }
   for (const v of vehicles) {
     if (v.x >= wx0 && v.x <= wx1 && v.y >= wy0 && v.y <= wy1) drawVehicle(v);

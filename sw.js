@@ -13,10 +13,11 @@ const ASSETS = [
   './', './index.html', './manifest.webmanifest',
   './icon-192.png', './icon-512.png', './apple-touch-icon.png',
   // src/main: アプリ本体 (ES モジュール)
-  './src/main/main.js', './src/main/camera.js', './src/main/config.js',
-  './src/main/input.js', './src/main/map.js', './src/main/render.js',
-  './src/main/rng.js', './src/main/roadpart.js', './src/main/scenario.js',
-  './src/main/vehicles.js',
+  './src/main/main.js', './src/main/camera.js', './src/main/collectible.js',
+  './src/main/config.js', './src/main/effects.js', './src/main/input.js',
+  './src/main/litter.js', './src/main/mail.js', './src/main/map.js',
+  './src/main/render.js', './src/main/rng.js', './src/main/roadpart.js',
+  './src/main/scenario.js', './src/main/vehicles.js',
 ];
 
 self.addEventListener('install', (e) => {

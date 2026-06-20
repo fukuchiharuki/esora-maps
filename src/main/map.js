@@ -103,17 +103,23 @@ export function tileInfo(tx, ty) {
   const n = (conns[0] ? 1 : 0) + (conns[1] ? 1 : 0) + (conns[2] ? 1 : 0) + (conns[3] ? 1 : 0);
   const road = n > 0;
   const junction = n > 2;                    // T 字(3)・十字(4) は交差点
-  // バス停: 直線部品 (相対する 2 口のみ) の一部に設置 (進行方向つき)
-  let stop = null;
+  // バス停・郵便ポスト: 直線部品 (相対する 2 口のみ) の一部に設置 (進行方向つき)。
+  // ポストはバス停より少しまばらで、視覚衝突を避けるためバス停タイルには置かない。
+  let stop = null, post = null;
   if (road && !junction) {
     const vert = conns[0] && conns[2] && !conns[1] && !conns[3];
     const horiz = conns[1] && conns[3] && !conns[0] && !conns[2];
-    if ((vert || horiz) && hash(tx, ty, 37) % 12 === 0) {
+    const straight = vert || horiz;
+    if (straight && hash(tx, ty, 37) % 12 === 0) {
       const dir = vert ? (hash(tx, ty, 41) % 2 ? 0 : 2) : (hash(tx, ty, 41) % 2 ? 1 : 3);
       stop = { dir };
     }
+    if (straight && !stop && hash(tx, ty, 53) % 14 === 0) {
+      const dir = vert ? (hash(tx, ty, 59) % 2 ? 0 : 2) : (hash(tx, ty, 59) % 2 ? 1 : 3);
+      post = { dir };
+    }
   }
-  t = { tx, ty, road, conns, junction, stop };
+  t = { tx, ty, road, conns, junction, stop, post };
   if (tileCache.size > 20000) { tileCache.clear(); blockCache.clear(); clusterCache.clear(); }
   tileCache.set(key, t);
   return t;

@@ -67,6 +67,17 @@ export function lanePath(din, dout) {
   return p;
 }
 
+// 路肩点 (沿道オブジェクトの位置): dir 方向に走る車の左路肩 (左側通行なので、その方向の
+// 特別車が寄せたとき横へ並ぶ側) のタイル内ローカル座標 (0..100)。along = 進行軸の位置 [0..1]。
+// ゴミ・郵便ポスト・郵便物が同じ路肩位置に乗るための共有幾何 (回収幾何を一致させる)。
+const SHOULDER_LAT = LANE_OFF + 8; // 車線中心から路肩 (= 寄せた特別車) までの横距離 ≒ 17
+export function shoulderPoint(dir, along) {
+  const hx = DX[dir], hy = DY[dir];   // 進行方向
+  const lx = hy, ly = -hx;            // その左 (= 路肩側)
+  const a = (along - 0.5) * 60;       // 進行軸に沿ったオフセット (±30 でタイル内に収める)
+  return { x: 50 + lx * SHOULDER_LAT + hx * a, y: 50 + ly * SHOULDER_LAT + hy * a };
+}
+
 // パス上の距離 s → ローカル座標と接線方向 (out にインプレース書き込み)
 export function pathPoint(path, s, out) {
   const { pts, cum, len } = path;

@@ -21,8 +21,9 @@
 import { DX, DY, OPP, TILE } from './config.js';
 import { vehicles, makeVehicle, removeVehicle, repositionVehicle, pullOver, returnToLane } from './vehicles.js';
 import { tileInfo } from './map.js';
-import { rect } from './camera.js';
-import { litter, nearestLitter, collectAround, removeLitter, setHighlight, clearHighlight } from './litter.js';
+import { rect, drawScale } from './camera.js';
+import { litterPool } from './litter.js';
+import { mailPool, BUBBLE_DY } from './mail.js';
 import { addRipple } from './effects.js';
 
 // 出来事の発生間隔 (秒)。次の発生までこの範囲のランダム時間あける = 稀。
@@ -328,85 +329,91 @@ function spawnPolice(flee) {
 registerEvent({ id: 'chase', weight: 1, spawn: spawnChase });
 
 // =====================================================================
-// 第二弾イベント: ゴミ収集 (ゴミ収集車 vs 路肩のゴミ)
+// 第二弾イベント: 収集 (特別車 vs 収集可能なワールドオブジェクト)
 //
-// 路肩のゴミ (litter.js) を回収して回る収集車。稀に湧き、同時に 1 台 (努力目標)。
-// ユーザーの操作なしにはゴミを探索しない: 目的地 (タップで「ハイライト」されたゴミ) があるときだけ
-// それへ向かい、回収できる距離まで来たら路肩へ寄せて (= 停止して) 回収する。ハイライトが無ければ
-// ただ走る。ゴミをタップするとそのゴミがハイライトされ目的地になる (居なければスポーンして向かう)。
+// 「ハイライトされた目的地へ向かい、回収できる距離まで来たら路肩へ寄せて (= 停止して) 約1秒後に
+// 回収する」収集車の汎用エンジン。稀に湧き、同種は同時に 1 台。ユーザーの操作なしには探索しない:
+// 目的地 (タップで「ハイライト」されたオブジェクト) があるときだけそれへ向かう。無ければただ走る。
+// オブジェクトをタップするとそれがハイライトされ目的地になる (収集車が居なければスポーンして向かう)。
+//
+// 収集対象の種類は collectorCfg で差し替える (どのプール / ロール / 色 / 寸法か):
+//   ゴミ収集 (ゴミ収集車 vs 路肩のゴミ litter.js) と 郵便回収 (郵便車 vs 郵便物 mail.js)。
 // =====================================================================
-const GARBAGE_PULLOVER_R = 14;  // 目的地のゴミがこの沿道距離 (前方) に来たら路肩へ寄せ始める (= 寄せ切ると停止して回収)
-const GARBAGE_COLLECT_R = 40;   // 路肩へ寄せ切った収集車がこの距離内のゴミを回収 (道路幅をまたいで対向路肩も届く / 並行路≧約66 は届かない)
-const GARBAGE_LANE_R = 44;      // この横 (車線差) 距離内のゴミだけ対象 (同じ道路の両車線=最大約34。並行する別の道路≧約66 は除外)
-const GARBAGE_DRIVE_VMAX = 28;  // 通常走行速度 (トラックなので控えめ)
-const GARBAGE_COLLECT_SPEED = 6;// 回収位置まで路肩を詰める徐行速度 (寄せ切れば aside で停止)
-const GARBAGE_COLLECT_DELAY = 1.0; // 路肩へ寄せ切ってから回収するまでの待ち (秒。路肩作業の演出)
-const GARBAGE_MAX_LIFE = 90000; // 安全策: この時間で打ち切り (ms)
-const GARBAGE_TAP_R = 40;       // タップ点からこの距離内のゴミを「タップした」とみなす
+const COLLECT_PULLOVER_R = 14;  // 目的地がこの沿道距離 (前方) に来たら路肩へ寄せ始める (= 寄せ切ると停止して回収)
+const COLLECT_R = 40;           // 路肩へ寄せ切った収集車がこの距離内を回収 (道路幅をまたいで対向路肩も届く / 並行路≧約66 は届かない)
+const COLLECT_LANE_R = 44;      // この横 (車線差) 距離内だけ対象 (同じ道路の両車線=最大約34。並行する別の道路≧約66 は除外)
+const COLLECT_DRIVE_VMAX = 28;  // 通常走行速度 (トラックなので控えめ)
+const COLLECT_SPEED = 6;        // 回収位置まで路肩を詰める徐行速度 (寄せ切れば aside で停止)
+const COLLECT_DELAY = 1.0;      // 路肩へ寄せ切ってから回収するまでの待ち (秒。路肩作業の演出)
+const COLLECT_MAX_LIFE = 90000; // 安全策: この時間で打ち切り (ms)
+const COLLECT_TAP_R = 40;       // タップ点からこの距離内の対象を「タップした」とみなす
 
-// 目的地のゴミが「回収できる距離」に来たか。直線タイル上のみ (寄せは直線限定)。
+// 目的地が「回収できる距離」に来たか。直線タイル上のみ (寄せは直線限定)。
 // - 沿道 (進行軸) 方向: 真横手前 PULLOVER_R で寄せ始め、寄せ切って停止後は真横〜後方 COLLECT_R まで寄せたまま。
-//   対向車線のゴミも走行車線のゴミと同じ沿道距離で回収可能にするため、横 (車線差) は距離に含めない。
+//   対向車線の対象も走行車線の対象と同じ沿道距離で回収可能にするため、横 (車線差) は距離に含めない。
 // - 横 (車線差) 方向: LANE_R 内に限る → 同じ道路の両車線 (最大約34) だけを対象にし、並行する別の道路
-//   (横に1タイル以上=約66 離れる) のゴミでは走行中の道路で寄せない (= 別の道路へ向かって走り続ける)。
+//   (横に1タイル以上=約66 離れる) では走行中の道路で寄せない (= 別の道路へ向かって走り続ける)。
 function destReachable(truck, g) {
   const ti = tileInfo(Math.floor(truck.x / TILE), Math.floor(truck.y / TILE));
   if (!isStraightTile(ti)) return false;
   const rx = g.x - truck.x, ry = g.y - truck.y;
   const fwd = rx * truck.hx + ry * truck.hy;          // 進行軸 (沿道) 方向の距離
   const lat = Math.abs(rx * truck.hy - ry * truck.hx); // 横 (車線差) 方向の距離
-  if (lat > GARBAGE_LANE_R) return false;             // 並行する別の道路のゴミは対象外
-  return fwd < GARBAGE_PULLOVER_R && fwd > -GARBAGE_COLLECT_R;
+  if (lat > COLLECT_LANE_R) return false;             // 並行する別の道路の対象は対象外
+  return fwd < COLLECT_PULLOVER_R && fwd > -COLLECT_R;
 }
 
-function makeGarbageEvent(truck, now) {
+// 収集イベント (役割非依存)。cfg.pool が収集対象のプール (ゴミ or 郵便物)。
+function makeCollectionEvent(cfg, truck, now) {
+  const pool = cfg.pool;
   return {
-    id: 'garbage', truck, t0: now, seen: false, done: false, dest: null, asideT: 0,
-    cleanup() { clearHighlight(); }, // 出来事終了時にハイライトを残さない
+    id: cfg.id, truck, t0: now, seen: false, done: false, dest: null, asideT: 0,
+    cleanup() { pool.clearHighlight(); }, // 出来事終了時にハイライトを残さない
     update(dt, t) {
-      if (vehicles.indexOf(truck) < 0) { clearHighlight(); this.done = true; return; } // グリッドロック撤去等で消えた
+      if (vehicles.indexOf(truck) < 0) { pool.clearHighlight(); this.done = true; return; } // グリッドロック撤去等で消えた
       // ハイライトされた目的地があるときだけ動く。回収できる距離まで来たら走行車線の路肩へ寄せ (停止し)、
       // 寄せ切った (aside) ら少し待って回収する (req: 路肩に寄せずに回収しない / 対向車線でも自車線の路肩で回収)。
       // ハイライトが無ければ探索せずただ走る (req: 操作なしに探索しない)。
-      if (this.dest && litter.indexOf(this.dest) >= 0) {
+      if (this.dest && pool.items.indexOf(this.dest) >= 0) {
         truck.targeting = true; // 目的地へ向かって回収するまでの間 → 位置インジケータを出す
         if (destReachable(truck, this.dest)) {
           pullOver(truck);
-          truck.vmax = GARBAGE_COLLECT_SPEED;
+          truck.vmax = COLLECT_SPEED;
           if (truck.aside) {
             // 寄せ切ってから COLLECT_DELAY 待って回収 (路肩作業の演出)。目的地は確実に、近くの同じ道路の
-            // ゴミ (走行車線・対向車線の両方) もまとめて回収する。
+            // 対象 (走行車線・対向車線の両方) もまとめて回収する。
             this.asideT += dt;
-            if (this.asideT >= GARBAGE_COLLECT_DELAY) {
-              removeLitter(this.dest);
-              collectAround(truck.x, truck.y, GARBAGE_COLLECT_R);
+            if (this.asideT >= COLLECT_DELAY) {
+              pool.remove(this.dest);
+              pool.collectAround(truck.x, truck.y, COLLECT_R);
             }
           } else this.asideT = 0; // 寄せ切る前 (徐行中) はカウントしない
         } else {
           returnToLane(truck);
-          truck.vmax = GARBAGE_DRIVE_VMAX;
+          truck.vmax = COLLECT_DRIVE_VMAX;
           this.asideT = 0;
         }
       } else {
-        if (this.dest) { this.dest = null; truck.steer = null; clearHighlight(); } // 回収/消滅 → 誘導解除
+        if (this.dest) { this.dest = null; truck.steer = null; pool.clearHighlight(); } // 回収/消滅 → 誘導解除
         truck.targeting = false; // 目的地が無い間は位置インジケータを出さない
         returnToLane(truck);
-        truck.vmax = GARBAGE_DRIVE_VMAX;
+        truck.vmax = COLLECT_DRIVE_VMAX;
         this.asideT = 0;
       }
       // 視界に一度入ったか → 入った後に視界外へ十分離れたら撤去 (チェイスと同様)。
       // 特別車は画面表示中はデスポーンさせない → 撤去は必ず画面外のときだけ (寿命超過の安全策も画面外限定)。
       if (!this.seen && inBox(truck, viewBoxWorld())) this.seen = true;
-      if (outsideBy(truck, 3) && (this.seen || t - this.t0 > GARBAGE_MAX_LIFE)) {
-        clearHighlight(); removeVehicle(truck); this.done = true;
+      if (outsideBy(truck, 3) && (this.seen || t - this.t0 > COLLECT_MAX_LIFE)) {
+        pool.clearHighlight(); removeVehicle(truck); this.done = true;
       }
     },
   };
 }
 
-// ゴミ収集車を画面外の直線道路 (無ければ視界内) に生成して返す。同時 1 台。
-function spawnGarbage(now) {
-  if (active.some(e => e.id === 'garbage')) return null; // 同時に 2 台以上出さない
+// 収集車を画面外の直線道路 (無ければ視界内) に生成して返す。同種は同時 1 台。
+// cfg = { id, pool, role, color, len, wid } で対象の種類 (見た目・プール) を差し替える。
+function spawnCollector(cfg, now) {
+  if (active.some(e => e.id === cfg.id)) return null; // 同種は同時に 2 台以上出さない
   const r = rect(0), N = 4;
   const isH = c => c[1] && c[3] && !c[0] && !c[2];
   const isV = c => c[0] && c[2] && !c[1] && !c[3];
@@ -430,28 +437,64 @@ function spawnGarbage(now) {
   if (!cands.length) return null;
   const pick = cands[(Math.random() * cands.length) | 0];
   const truck = makeVehicle(pick.t.tx, pick.t.ty, pick.din, pick.dout, false);
-  truck.role = 'garbage'; truck.color = '#7ec8dc'; truck.len = 20; truck.wid = 9;
-  truck.vmax = GARBAGE_DRIVE_VMAX; truck.targeting = false; // 目的地が出来るまで位置インジケータは出さない
+  truck.role = cfg.role; truck.color = cfg.color; truck.len = cfg.len; truck.wid = cfg.wid;
+  truck.vmax = COLLECT_DRIVE_VMAX; truck.targeting = false; // 目的地が出来るまで位置インジケータは出さない
   truck.s = truck.path.len * 0.5; repositionVehicle(truck);
   vehicles.push(truck);
-  return makeGarbageEvent(truck, now);
+  return makeCollectionEvent(cfg, truck, now);
 }
 
-registerEvent({ id: 'garbage', weight: 1, spawn: spawnGarbage });
+// 収集の種類を登録 (タップ振り分け + 自動発生イベントの両方に効く)。
+const collectorCfgs = [];
+function registerCollector(cfg) {
+  collectorCfgs.push(cfg);
+  registerEvent({ id: cfg.id, weight: cfg.weight || 1, spawn: (now) => spawnCollector(cfg, now) });
+}
 
-// ゴミをタップ → そのゴミをハイライトし、収集車を向かわせる (居なければスポーン)。タップが効いた
-// 合図として共通の波紋エフェクトを出す。ゴミ以外のタップは何もしない (false を返し、ダブルタップ
-// ズーム等を妨げない)。
+// ゴミ収集 (ゴミ収集車 = 水色 vs 路肩のゴミ)
+registerCollector({ id: 'garbage', pool: litterPool, role: 'garbage', color: '#7ec8dc', len: 20, wid: 9 });
+// 郵便回収 (郵便車 = 赤 vs 郵便物)。チェイス/ゴミ収集とは別種なので同時に存在し得る (同種は単一)。
+// iconDY: 郵便物はポスト本体だけでなく、その上の吹き出しアイコン (ポスト点から上に BUBBLE_DY×拡大率)
+// でもタップ可能にする (= ポストでもアイコンでも受け付ける)。
+registerCollector({ id: 'mail', pool: mailPool, role: 'post', color: '#d2362f', len: 18, wid: 8, iconDY: BUBBLE_DY });
+
+// タップ点 (wx,wy) に最も近い cfg の収集対象を返す ({ g, dd } / 無ければ null)。本体座標に加え、
+// アイコン (吹き出し) を持つ対象 (cfg.iconDY) はアイコン座標 (ポスト点から上に iconDY×拡大率) でも
+// 受け付ける → 郵便物はポストでも吹き出しでもタップできる。
+function nearestTappable(cfg, wx, wy, sc) {
+  const offY = cfg.iconDY ? -cfg.iconDY * sc : 0; // アイコンの上方向オフセット (描画拡大率込み)
+  let best = null, bestD = COLLECT_TAP_R * COLLECT_TAP_R;
+  for (const g of cfg.pool.items) {
+    let dd = (g.x - wx) ** 2 + (g.y - wy) ** 2;             // 本体 (ポスト/ゴミ) 上
+    if (offY) {
+      const d2 = (g.x - wx) ** 2 + (g.y + offY - wy) ** 2;  // アイコン (吹き出し) 上
+      if (d2 < dd) dd = d2;
+    }
+    if (dd <= bestD) { bestD = dd; best = g; }
+  }
+  return best ? { g: best, dd: bestD } : null;
+}
+
+// 収集対象をタップ → それをハイライトし、対応する収集車を向かわせる (居なければスポーン)。タップが
+// 効いた合図として共通の波紋エフェクトを出す。どの収集対象も指していなければ何もしない (false を返し、
+// ダブルタップズーム等を妨げない)。複数種が近接していたら最寄りの対象に振り分ける (ハイライトは種別ごと独立)。
 export function tapWorld(wx, wy) {
-  const g = nearestLitter(wx, wy, GARBAGE_TAP_R);
-  if (!g) return false;                                   // ゴミを指していない → 非消費
-  addRipple(wx, wy, lastNow);                             // 共通エフェクト: タップが効いた合図 (波紋)
-  let ev = active.find(e => e.id === 'garbage');
-  if (!ev) { ev = spawnGarbage(lastNow); if (ev) active.push(ev); } // 不在ならスポーンして管理下へ
-  if (ev && ev.truck) {                                   // タップしたゴミをハイライト → 目的地に
-    setHighlight(g);                                      // 別のゴミをタップするとハイライトが移る
+  const sc = drawScale();                                  // 拡大表示されたアイコンの当たり判定に使う
+  let best = null; // { cfg, g, dd }
+  for (const cfg of collectorCfgs) {
+    const hit = nearestTappable(cfg, wx, wy, sc);
+    if (!hit) continue;
+    if (!best || hit.dd < best.dd) best = { cfg, g: hit.g, dd: hit.dd };
+  }
+  if (!best) return false;                                 // 収集対象を指していない → 非消費
+  addRipple(wx, wy, lastNow);                              // 共通エフェクト: タップが効いた合図 (波紋)
+  const { cfg, g } = best;
+  let ev = active.find(e => e.id === cfg.id);
+  if (!ev) { ev = spawnCollector(cfg, lastNow); if (ev) active.push(ev); } // 不在ならスポーンして管理下へ
+  if (ev && ev.truck) {                                    // タップした対象をハイライト → 目的地に
+    cfg.pool.setHighlight(g);                              // 同種の別対象をタップするとハイライトが移る
     ev.dest = g;
     ev.truck.steer = (tile, din) => pursue(tile, din, g);
   }
-  return true;                                            // ゴミを指したタップは消費
+  return true;                                             // 収集対象を指したタップは消費
 }

@@ -42,6 +42,16 @@ export function rect(marginTiles) {
   };
 }
 
+// 引き (低ズーム) ほど世界オブジェクト (車両・ゴミ・郵便物) を大きく描く描画スケール。
+// 最寄り (MAX_ZOOM)=実寸(1)、最引き (MIN_ZOOM)=DRAW_SCALE_MAX 倍。render の描画と、
+// 拡大表示されたアイコンの当たり判定 (郵便物の吹き出し位置) で同じ値を使う (単一ソース)。
+const DRAW_SCALE_MAX = 3.0; // 乗用車 幅7.5 × 3.0 ≒ 22.5 ≒ 片車線 18 をしっかり超える
+export function drawScale() {
+  const t = (MAX_ZOOM - cam.zoom) / (MAX_ZOOM - MIN_ZOOM); // 0 = 最寄り … 1 = 最引き
+  const c = t < 0 ? 0 : t > 1 ? 1 : t;
+  return 1 + c * (DRAW_SCALE_MAX - 1);
+}
+
 // カメラを通りの交差点近くから開始
 export function placeCamera() {
   for (let x = 0; x < 30; x++) {

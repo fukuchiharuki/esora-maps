@@ -15,6 +15,7 @@ import * as camera from './camera.js';
 import * as vehicles from './vehicles.js';
 import * as scenario from './scenario.js';
 import * as litter from './litter.js';
+import * as mail from './mail.js';
 import * as effects from './effects.js';
 import * as render from './render.js';
 import { initInput } from './input.js';
@@ -39,7 +40,8 @@ function frame(now) {
   camera.stepAnim(now);          // ダブルタップズームのアニメーション
   vehicles.manageVehicles(now);  // 車両スポーン / デスポーン
   litter.manageLitter(now);      // 路肩のゴミ スポーン / デスポーン
-  scenario.updateScenarios(dt, now); // 出来事 (カーチェイス・ゴミ収集) のスポーン/進行/後始末
+  mail.manageMail(now);          // 郵便ポスト上の郵便物 スポーン / デスポーン
+  scenario.updateScenarios(dt, now); // 出来事 (カーチェイス・ゴミ収集・郵便回収) のスポーン/進行/後始末
   effects.updateEffects(now);    // 一時的な視覚エフェクト (タップ波紋) の寿命管理
   vehicles.updateAll(dt);        // 走行
   render.drawScene();            // 描画
